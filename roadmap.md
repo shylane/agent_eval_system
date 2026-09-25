@@ -4,6 +4,6 @@ Priority is relative importance, not implementation authorization. `proposed` it
 
 | ID | Work item | Priority | Status | Parent | Depends on | Owner | Next action |
 |---|---|---|---|---|---|---|---|
-| W-000 | [Project management and verification setup](work/W-000.md) | P1 | in_review | — | — | codex | Commit and verify the evidence-backed completion transition |
+| W-000 | [Project management and verification setup](work/W-000.md) | P1 | done | — | — | codex | User reviews draft PR #1 |
 | W-001 | [First measured pilot proof](work/W-001.md) | P1 | proposed | — | — | unassigned | Resolve the candidate workflow and baseline first |
 | W-002 | [Choose pilot workflow and establish a narrow baseline](work/W-002.md) | P1 | proposed | W-001 | — | unassigned | Define the E7 pilot brief and comparison evidence |
