@@ -118,12 +118,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Twenty-three required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Twenty-four required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 23,
-            "selected_tests": 23,
+            "discovered_tests": 24,
+            "selected_tests": 24,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -527,6 +527,46 @@ class WorkCheckerFixtures(unittest.TestCase):
             )
         finally:
             repo.close()
+
+    def test_retired_verification_ids_preserve_history_but_block_new_completion(self) -> None:
+        repo = FixtureRepo(structured_review=True)
+        try:
+            git(repo.root, "switch", "main")
+            git(repo.root, "merge", "--ff-only", "fixture-work")
+            git(repo.root, "switch", "-c", "post-completion-rule-change")
+            config_path = repo.root / "verification.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["checks"][1]["id"] = "checker-fixtures-v2"
+            config["review_methods"][0]["id"] = "structured-review-v2"
+            config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            repo.commit("synthetic rename of verification IDs after completion")
+
+            result = validate(repo.root, "main")
+            self.assertFalse(
+                [finding for finding in result["findings"] if finding["severity"] in {"blocking", "missing", "unable"}],
+                result,
+            )
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK008" and finding["severity"] == "warning"
+                    and "retired verification ID" in finding["message"] for finding in result["findings"]),
+                result,
+            )
+        finally:
+            repo.close()
+
+        active = FixtureRepo("in_review", structured_review=True)
+        try:
+            data, body = read_record(active.root)
+            data["evidence"][0]["check_id"] = "retired-check-id"
+            write_record(active.root, data, body)
+            result = validate(active.root, "main")
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK007" and finding["severity"] == "blocking"
+                    and "unknown configured check ID" in finding["message"] for finding in result["findings"]),
+                result,
+            )
+        finally:
+            active.close()
 
     def test_rubric_change_does_not_rewrite_historical_completion(self) -> None:
         repo = FixtureRepo()

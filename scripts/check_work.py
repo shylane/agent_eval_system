@@ -1240,6 +1240,18 @@ class Checker:
                 continue
             check = self.checks.get(ev.get("check_id"))
             review_method = self.review_methods.get(ev.get("check_id"))
+            if check is None and review_method is None and historical_done:
+                completion_commit = self.done_commits.get(item_id)
+                if completion_commit:
+                    historical_checks, historical_methods = self._verification_at_commit(completion_commit)
+                    check = historical_checks.get(ev.get("check_id"))
+                    review_method = historical_methods.get(ev.get("check_id"))
+                    if check is not None or review_method is not None:
+                        self.add(
+                            "WRK008", "warning",
+                            f"historical evidence used retired verification ID {ev.get('check_id')}; current assurance needs a currently configured check",
+                            item_id, cid, rel,
+                        )
             if check is None and review_method is None:
                 self.add("WRK007", "blocking", f"unknown configured check ID {ev.get('check_id')}", item_id, cid, rel)
                 continue
