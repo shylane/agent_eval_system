@@ -44,7 +44,7 @@
 2. Run the read-only checker, then relevant commands from `verification.json` via `scripts/run_verification.py`; never execute item prose.
 3. Confirm all required criteria have applicable passing evidence; required tests were discovered/selected with no skips; blocking findings have explicit resolutions.
 4. Set `in_review` and request a fresh independent review using [review-procedure.md](review-procedure.md). Inspect primary evidence.
-5. Record report, assessed revision, baseline, rubric, role and available model/effort. For fixes, resolve findings and run one review of those fixes.
-6. Mark `done` only when checker prerequisites and the `ready` review verdict pass. Otherwise remain `in_review` or `blocked` with a next action.
+5. Append the report and review object in chronological order; preserve earlier entries. Resolve every blocking finding with evidence. A later `changes_required` or `unable_to_verify` entry supersedes any earlier ready recommendation; review fixes once.
+6. Mark `done` only when checker prerequisites pass and the latest review entry is `ready`, independent/domain-owner, finding-free, and fresh for the proposed revision. Otherwise remain `in_review` or `blocked` with a next action.
 
 **Success:** fresh applicable evidence plus ready independent review. **Failure:** missing/stale/unable evidence, skipped tests, uncorroborated approval, or open findings means not done. A negative experiment result passes if the agreed method/reporting contract passed.

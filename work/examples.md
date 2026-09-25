@@ -25,3 +25,5 @@ Append a decision object with all fields: `affected_criteria`, `previous_wording
 ## Submit completion evidence
 
 For each required criterion record source commit/fingerprint, accepted baseline, configured check ID, actual argv array, exit status, result, applicability, summary/location, provenance, environment, and test counts when configured. A negative experiment can have `result: "pass"` when the method/report criterion passed and its summary says the hypothesis was rejected. Do not relabel a failed behavior check as pass.
+
+When submitting after review, append the new review entry after prior entries. Preserve earlier `changes_required` reports, resolve each finding with evidence, and leave the item outside `done` unless the latest review entry is a fresh `ready` recommendation.

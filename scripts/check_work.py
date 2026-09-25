@@ -696,7 +696,8 @@ class Checker:
             if not self._history_evidence_complete(commit, item_id, data):
                 self.add("WRK007", "blocking", "done transition lacked complete applicable evidence at that commit", item_id, path="roadmap.md")
             reviews = data.get("reviews", [])
-            ready_review = any(
+            review = reviews[-1] if isinstance(reviews, list) and reviews else None
+            ready_review = (
                 isinstance(review, dict)
                 and review.get("role") in {"independent", "domain_owner"}
                 and review.get("verdict") == "ready"
@@ -704,10 +705,20 @@ class Checker:
                 and review.get("criteria_baseline_commit") == data.get("accepted_criteria_commit")
                 and review.get("rubric_version") == self._rubric_version_at(commit)
                 and self._commit_artifact_exists(commit, review.get("report"))
-                for review in (reviews if isinstance(reviews, list) else [])
             )
+            if ready_review:
+                revision = review.get("assessed_source_commit")
+                if not valid_commit(self.root, revision):
+                    ready_review = False
+                else:
+                    later = {
+                        p.replace("\\", "/")
+                        for p in git(self.root, "diff", "--name-only", f"{revision}..{commit}", check=False).splitlines()
+                        if p
+                    }
+                    ready_review = not self._record_metadata_only_between(revision, commit, later, item_id)
             if not ready_review:
-                self.add("WRK009", "blocking", "done transition lacked an independent ready review report at that commit", item_id, path="roadmap.md")
+                self.add("WRK009", "blocking", "done transition lacked a latest, fresh independent ready review report at that commit", item_id, path="roadmap.md")
         if status == "blocked":
             blocker = data.get("blocker")
             if not isinstance(blocker, dict) or is_placeholder(blocker.get("reason")) or is_placeholder(blocker.get("next_action")):
@@ -1034,6 +1045,17 @@ class Checker:
                 digest.update(b"\0")
         return digest.hexdigest()
 
+    @staticmethod
+    def _append_only_records(before: dict[str, Any], after: dict[str, Any], field: str) -> bool:
+        old_records = before.get(field)
+        new_records = after.get(field)
+        return (
+            isinstance(old_records, list)
+            and isinstance(new_records, list)
+            and len(new_records) >= len(old_records)
+            and new_records[:len(old_records)] == old_records
+        )
+
     def _record_metadata_only_between(self, before_commit: str, after_commit: str, paths: set[str], item_id: str) -> set[str]:
         """Exclude only documented record bookkeeping between two immutable revisions."""
         remaining = set(paths)
@@ -1055,18 +1077,29 @@ class Checker:
             old_data, _, old_error = parse_frontmatter(before)
             new_data, _, new_error = parse_frontmatter(after)
             if not old_error and not new_error and old_data is not None and new_data is not None:
+                histories_append_only = all(
+                    self._append_only_records(old_data, new_data, field)
+                    for field in ("evidence", "resolutions", "reviews")
+                )
                 for data in (old_data, new_data):
                     data.pop("evidence", None)
+                    data.pop("resolutions", None)
                     data.pop("reviews", None)
                 def stable_body(record: str) -> str:
                     body = frontmatter_body(record)
                     for heading in ("## Execution checkpoint", "## Evidence", "## Review"):
                         body = re.sub(rf"{re.escape(heading)}\s*\n.*?(?=\n## |\Z)", heading + "\n<mutable>\n", body, flags=re.S)
                     return body.strip()
-                if old_data == new_data and stable_body(before) == stable_body(after):
+                if histories_append_only and old_data == new_data and stable_body(before) == stable_body(after):
                     remaining.discard(record_rel)
 
-        remaining = {name for name in remaining if not name.startswith("work/reviews/")}
+        for name in tuple(remaining):
+            if not name.startswith("work/reviews/"):
+                continue
+            existed_before = bool(git(self.root, "ls-tree", "-r", "--name-only", before_commit, "--", name, check=False).splitlines())
+            exists_after = bool(git(self.root, "ls-tree", "-r", "--name-only", after_commit, "--", name, check=False).splitlines())
+            if not existed_before and exists_after:
+                remaining.discard(name)
         return remaining
 
     def _record_metadata_only_since(self, commit: str, paths: set[str], item_id: str, current_text: str) -> set[str]:
@@ -1088,18 +1121,28 @@ class Checker:
             old_data, _, old_error = parse_frontmatter(before)
             new_data, _, new_error = parse_frontmatter(current_text)
             if not old_error and not new_error and old_data is not None and new_data is not None:
+                histories_append_only = all(
+                    self._append_only_records(old_data, new_data, field)
+                    for field in ("evidence", "resolutions", "reviews")
+                )
                 for data in (old_data, new_data):
                     data.pop("evidence", None)
+                    data.pop("resolutions", None)
                     data.pop("reviews", None)
                 def stable_body(record: str) -> str:
                     body = frontmatter_body(record)
                     for heading in ("## Execution checkpoint", "## Evidence", "## Review"):
                         body = re.sub(rf"{re.escape(heading)}\s*\n.*?(?=\n## |\Z)", heading + "\n<mutable>\n", body, flags=re.S)
                     return body.strip()
-                if old_data == new_data and stable_body(before) == stable_body(current_text):
+                if histories_append_only and old_data == new_data and stable_body(before) == stable_body(current_text):
                     remaining.discard(record_rel)
 
-        remaining = {name for name in remaining if not name.startswith("work/reviews/")}
+        for name in tuple(remaining):
+            if not name.startswith("work/reviews/"):
+                continue
+            existed_before = bool(git(self.root, "ls-tree", "-r", "--name-only", commit, "--", name, check=False).splitlines())
+            if not existed_before and (self.root / name).is_file():
+                remaining.discard(name)
         return remaining
 
     def _check_evidence(self, item_id: str, data: dict[str, Any], path: Path) -> None:
@@ -1193,18 +1236,20 @@ class Checker:
         rel = path.relative_to(self.root).as_posix()
         baseline = data.get("accepted_criteria_commit")
         done_at = self.done_commits.get(item_id, self.head_sha)
-        historical_done = done_at != self.head_sha or self.dirty
         try:
             procedure = (self.root / "work" / "review-procedure.md").read_text(encoding="utf-8")
         except OSError:
             procedure = ""
         rubric_match = re.search(r"(?m)^Rubric version: `([a-z0-9-]+)`\s*$", procedure)
         current_rubric = rubric_match.group(1) if rubric_match else None
+        reviews = data.get("reviews", []) if isinstance(data.get("reviews"), list) else []
+        latest_review_index = len(reviews) - 1
         valid_ready = False
         unresolved_review_findings: set[str] = set()
-        for review in data.get("reviews", []) if isinstance(data.get("reviews"), list) else []:
+        for review_index, review in enumerate(reviews):
             if not isinstance(review, dict):
                 continue
+            current_review = review_index == latest_review_index
             if review.get("role") not in REVIEW_ROLES or review.get("verdict") not in REVIEW_VERDICTS:
                 self.add("WRK009", "blocking", "review role or verdict is invalid", item_id, path=rel)
                 continue
@@ -1222,30 +1267,36 @@ class Checker:
             if not valid_commit(self.root, revision) or not valid_commit(self.root, review.get("criteria_baseline_commit")):
                 self.add("WRK009", "unable", "review revision or criteria baseline is unresolved", item_id, path=rel)
                 continue
-            if review.get("criteria_baseline_commit") != baseline:
-                self.add("WRK009", "blocking", "review must cover the accepted criteria baseline", item_id, path=rel)
-            if not current_rubric or review.get("rubric_version") != current_rubric:
-                severity = "warning" if historical_done else "blocking"
+            baseline_matches = review.get("criteria_baseline_commit") == baseline
+            if not baseline_matches:
+                severity = "blocking" if current_review else "warning"
+                self.add("WRK009", severity, "review must cover the accepted criteria baseline", item_id, path=rel)
+            rubric_matches = bool(current_rubric and review.get("rubric_version") == current_rubric)
+            if not rubric_matches:
+                severity = "blocking" if current_review else "warning"
                 self.add("WRK009", severity, "review rubric differs from the current rubric; inspect historical completion or repeat review", item_id, path=rel)
             later = {
                 p.replace("\\", "/")
                 for p in git(self.root, "diff", "--name-only", f"{revision}..{done_at}", check=False).splitlines()
                 if p
             }
-            if self._record_metadata_only_between(revision, done_at, later, item_id):
-                self.add("WRK009", "blocking", "review assessed an older revision with substantive changes afterward", item_id, path=rel)
-            after_done = git(self.root, "diff", "--name-only", f"{done_at}..{self.head_sha}", check=False).splitlines()
-            if after_done or (self.dirty and self.changed_paths):
-                self.add("WRK009", "warning", "historical completion and review remain recorded; inspect current changes before making a new completion claim", item_id, path=rel)
-            if review.get("role") in {"author", "self"}:
-                self.add("WRK009", "blocking", "self-review cannot satisfy independent review", item_id, path=rel)
+            substantive_after = bool(self._record_metadata_only_between(revision, done_at, later, item_id))
+            if current_review and review.get("verdict") == "ready" and substantive_after:
+                self.add("WRK009", "blocking", "latest review assessed an older revision with substantive changes afterward", item_id, path=rel)
+            if current_review and review.get("role") in {"author", "self"}:
+                self.add("WRK009", "blocking", "latest review cannot be an author/self-review", item_id, path=rel)
             if review.get("verdict") == "changes_required":
                 findings = review.get("findings", [])
                 unresolved_review_findings.update(x for x in findings if isinstance(x, str))
-            if review.get("role") in {"independent", "domain_owner"} and review.get("verdict") == "ready" and not review.get("findings"):
+            if (current_review and review.get("role") in {"independent", "domain_owner"}
+                    and review.get("verdict") == "ready" and not review.get("findings")
+                    and baseline_matches and rubric_matches and not substantive_after):
                 valid_ready = True
+        after_done = git(self.root, "diff", "--name-only", f"{done_at}..{self.head_sha}", check=False).splitlines()
+        if after_done or (self.dirty and self.changed_paths):
+            self.add("WRK009", "warning", "historical completion and review remain recorded; inspect current changes before making a new completion claim", item_id, path=rel)
         if not valid_ready:
-            self.add("WRK009", "missing", "done requires an independent/domain-owner review with verdict ready", item_id, path=rel)
+            self.add("WRK009", "missing", "done requires the latest recorded review to be independent/domain-owner ready and cover the current revision", item_id, path=rel)
         resolutions = data.get("resolutions", []) if isinstance(data.get("resolutions"), list) else []
         resolved_ids = {r.get("finding_id") for r in resolutions if isinstance(r, dict) and r.get("disposition") == "resolved" and not is_placeholder(r.get("evidence"))}
         unresolved = unresolved_review_findings - resolved_ids

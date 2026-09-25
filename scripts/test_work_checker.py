@@ -64,7 +64,7 @@ class FixtureRepo:
     """Construct an isolated synthetic history with a proposed item and a valid completion."""
 
     def __init__(self, final_status: str = "done", integrity_watches_work: bool = False,
-                 structured_review: bool = False):
+                 structured_review: bool = False, historical_review: bool = False):
         self.temp = tempfile.TemporaryDirectory(prefix="work-record-fixture-")
         self.root = Path(self.temp.name)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
@@ -117,12 +117,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Sixteen required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Seventeen required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 16,
-            "selected_tests": 16,
+            "discovered_tests": 17,
+            "selected_tests": 17,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -162,6 +162,8 @@ class FixtureRepo:
             self.commit("synthetic in review")
             self.review_revision = git(self.root, "rev-parse", "HEAD")
         if final_status == "done":
+            if historical_review:
+                self.record_prior_changes_review()
             self.finish_review()
         self.final_status = final_status
 
@@ -188,7 +190,7 @@ class FixtureRepo:
             encoding="utf-8",
         )
         data, body = read_record(self.root)
-        data["reviews"] = [{
+        data["reviews"].append({
             "role": "independent",
             "assessed_source_commit": self.review_revision,
             "criteria_baseline_commit": self.criteria_baseline,
@@ -198,10 +200,39 @@ class FixtureRepo:
             "model": None,
             "reasoning_effort": None,
             "findings": [],
-        }]
+        })
         write_record(self.root, data, body)
         self.set_status("done", "fixture-agent", "Preserve the historical result")
         self.commit("synthetic done")
+
+    def record_prior_changes_review(self) -> None:
+        report = self.root / "work" / "reviews" / "W-900-changes-required.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            f"# Synthetic changes-required review\n\nRevision: `{self.criteria_baseline}`\n\n"
+            "Finding W-900-R1 was fixed in a later implementation checkpoint.\n",
+            encoding="utf-8",
+        )
+        data, body = read_record(self.root)
+        data["reviews"].append({
+            "role": "independent",
+            "assessed_source_commit": self.criteria_baseline,
+            "criteria_baseline_commit": self.criteria_baseline,
+            "rubric_version": "review-rubric-v1",
+            "verdict": "changes_required",
+            "report": "work/reviews/W-900-changes-required.md",
+            "model": None,
+            "reasoning_effort": None,
+            "findings": ["W-900-R1"],
+        })
+        data["resolutions"].append({
+            "finding_id": "W-900-R1",
+            "disposition": "resolved",
+            "evidence": "Synthetic implementation checkpoint fixes the reported issue.",
+            "approval_ref": None,
+        })
+        write_record(self.root, data, body)
+        self.commit("synthetic resolved review finding")
 
     def close(self) -> None:
         self.temp.cleanup()
@@ -242,6 +273,61 @@ class WorkCheckerFixtures(unittest.TestCase):
             )
         finally:
             stale.close()
+
+    def test_resolved_historical_review_precedes_current_ready_review(self) -> None:
+        repo = FixtureRepo(historical_review=True)
+        try:
+            data, body = read_record(repo.root)
+            self.assertEqual([review["verdict"] for review in data["reviews"]], ["changes_required", "ready"])
+            result = validate(repo.root, "main")
+            self.assertEqual(result["exit_code"], 0, result)
+            self.assertFalse(findings(result, "WRK013"), result)
+        finally:
+            repo.close()
+
+        unresolved = FixtureRepo(historical_review=True)
+        try:
+            data, body = read_record(unresolved.root)
+            data["resolutions"] = []
+            write_record(unresolved.root, data, body)
+            unresolved.commit("synthetic unresolved review finding")
+            result = validate(unresolved.root, "main")
+            self.assertTrue(findings(result, "WRK013"), result)
+        finally:
+            unresolved.close()
+
+        later_changes_required = FixtureRepo()
+        try:
+            report = later_changes_required.root / "work" / "reviews" / "W-900-later-changes-required.md"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("# Synthetic later changes-required review\n", encoding="utf-8")
+            data, body = read_record(later_changes_required.root)
+            data["reviews"].append({
+                "role": "independent",
+                "assessed_source_commit": later_changes_required.review_revision,
+                "criteria_baseline_commit": later_changes_required.criteria_baseline,
+                "rubric_version": "review-rubric-v1",
+                "verdict": "changes_required",
+                "report": "work/reviews/W-900-later-changes-required.md",
+                "model": None,
+                "reasoning_effort": None,
+                "findings": ["W-900-R2"],
+            })
+            data["resolutions"].append({
+                "finding_id": "W-900-R2",
+                "disposition": "resolved",
+                "evidence": "Synthetic fixture records the reported correction.",
+                "approval_ref": None,
+            })
+            write_record(later_changes_required.root, data, body)
+            later_changes_required.commit("synthetic later changes-required report")
+            result = validate(later_changes_required.root, "main")
+            self.assertTrue(
+                any("latest recorded review" in f["message"] for f in findings(result, "WRK009")),
+                result,
+            )
+        finally:
+            later_changes_required.close()
 
     def test_missing_and_stale_evidence(self) -> None:
         missing = FixtureRepo("in_review")
