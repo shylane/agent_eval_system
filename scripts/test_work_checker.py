@@ -63,13 +63,27 @@ def update_roadmap_row(root: Path, item_id: str, *, status: str | None = None,
 class FixtureRepo:
     """Construct an isolated synthetic history with a proposed item and a valid completion."""
 
-    def __init__(self, final_status: str = "done", integrity_watches_work: bool = False):
+    def __init__(self, final_status: str = "done", integrity_watches_work: bool = False,
+                 structured_review: bool = False):
         self.temp = tempfile.TemporaryDirectory(prefix="work-record-fixture-")
         self.root = Path(self.temp.name)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
-        if integrity_watches_work:
+        if integrity_watches_work or structured_review:
             config_path = self.root / "verification.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
+            if structured_review:
+                config["review_methods"] = [{
+                    "id": "structured-review-v1",
+                    "procedure": "work/structured-review-procedure.md",
+                    "report_template": "work/structured-review-template.md",
+                    "required_reviewer_role": "independent",
+                }]
+                (self.root / "work" / "structured-review-procedure.md").write_text(
+                    "Synthetic fixture review method.\n", encoding="utf-8"
+                )
+                (self.root / "work" / "structured-review-template.md").write_text(
+                    "Synthetic fixture report template.\n", encoding="utf-8"
+                )
             config["checks"][0]["watched_paths"].extend(["roadmap.md", "work/**"])
             config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         git(self.root, "init", "--initial-branch=main")
@@ -103,18 +117,47 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Fifteen required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Sixteen required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 15,
-            "selected_tests": 15,
+            "discovered_tests": 16,
+            "selected_tests": 16,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
         data["evidence"] = [self.evidence.copy()]
         write_record(self.root, data, body)
         if final_status in {"in_review", "done"}:
+            if structured_review:
+                review_report = self.root / "work" / "reviews" / "W-900-structured-review.md"
+                review_report.parent.mkdir(parents=True, exist_ok=True)
+                review_report.write_text(
+                    f"# Synthetic structured review\n\nSource: `{self.source_commit}`\n\n"
+                    "Synthetic fixture evidence only.\n",
+                    encoding="utf-8",
+                )
+                review_evidence = {
+                    "criterion_id": "W-900-AC1",
+                    "source_commit": self.source_commit,
+                    "source_fingerprint": None,
+                    "criteria_baseline_commit": self.criteria_baseline,
+                    "check_id": "structured-review-v1",
+                    "command": [],
+                    "exit_status": None,
+                    "result": "pass",
+                    "applicable": True,
+                    "summary": "The synthetic review method completed its report.",
+                    "location": "work/reviews/W-900-structured-review.md",
+                    "provenance": "agent_reported",
+                    "environment": "synthetic isolated fixture; structured review method",
+                    "discovered_tests": None,
+                    "selected_tests": None,
+                    "skipped_tests": None,
+                }
+                data, body = read_record(self.root)
+                data["evidence"].append(review_evidence)
+                write_record(self.root, data, body)
             self.set_status("in_review", "fixture-agent", "Request synthetic independent review")
             self.commit("synthetic in review")
             self.review_revision = git(self.root, "rev-parse", "HEAD")
@@ -178,6 +221,27 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
         finally:
             repo.close()
+
+    def test_structured_review_evidence_stays_fresh_and_substantive_edits_stale_it(self) -> None:
+        complete = FixtureRepo(structured_review=True)
+        try:
+            result = validate(complete.root, "main")
+            self.assertEqual(result["exit_code"], 0, result)
+            self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
+        finally:
+            complete.close()
+
+        stale = FixtureRepo("in_review", structured_review=True)
+        try:
+            behavior = stale.root / "src" / "behavior.txt"
+            behavior.write_text(behavior.read_text(encoding="utf-8") + "substantive change\n", encoding="utf-8")
+            result = validate(stale.root, "main")
+            self.assertTrue(
+                any("src/behavior.txt" in f["message"] for f in findings(result, "WRK008")),
+                result,
+            )
+        finally:
+            stale.close()
 
     def test_missing_and_stale_evidence(self) -> None:
         missing = FixtureRepo("in_review")

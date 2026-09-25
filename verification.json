@@ -5,6 +5,6 @@
   ],
   "checks": [
     {"id":"record-integrity","argv":["uv","run","--no-project","python","scripts/check_work.py"],"test_expectation":false,"minimum_discovered":0,"watched_paths":["roadmap.md","work/**","manifest.md","experiments.md","AGENTS.md","README.md","scripts/check_work.py","scripts/run_verification.py",".github/workflows/**",".agents/skills/project-work/**","pyproject.toml","uv.lock","requirements*.txt"]},
-    {"id":"checker-fixtures","argv":["uv","run","--no-project","python","scripts/test_work_checker.py"],"test_expectation":true,"minimum_discovered":15,"watched_paths":["scripts/**","tests/**","verification.json","work/policy.md",".github/workflows/project-management.yml","pyproject.toml","uv.lock","requirements*.txt"]}
+    {"id":"checker-fixtures","argv":["uv","run","--no-project","python","scripts/test_work_checker.py"],"test_expectation":true,"minimum_discovered":16,"watched_paths":["scripts/**","tests/**","verification.json","work/policy.md",".github/workflows/project-management.yml","pyproject.toml","uv.lock","requirements*.txt"]}
   ]
 }

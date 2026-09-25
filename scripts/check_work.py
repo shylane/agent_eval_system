@@ -1135,7 +1135,7 @@ class Checker:
                     self.add("WRK016", "unable", "evidence source commit cannot be resolved", item_id, cid, rel)
                     continue
                 stale_paths = self._changed_since(source_commit, watch)
-                if check is not None and check.get("id") == "record-integrity":
+                if review_method is not None or (check is not None and check.get("id") == "record-integrity"):
                     stale_paths = self._record_metadata_only_since(source_commit, stale_paths, item_id, (self.root / rel).read_text(encoding="utf-8"))
                 historical_stale = status == "done" and bool(stale_paths)
                 if stale_paths:
