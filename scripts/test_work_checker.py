@@ -64,7 +64,8 @@ class FixtureRepo:
     """Construct an isolated synthetic history with a proposed item and a valid completion."""
 
     def __init__(self, final_status: str = "done", integrity_watches_work: bool = False,
-                 structured_review: bool = False, historical_review: bool = False):
+                 structured_review: bool = False, historical_review: bool = False,
+                 resolve_historical_review: bool = True):
         self.temp = tempfile.TemporaryDirectory(prefix="work-record-fixture-")
         self.root = Path(self.temp.name)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
@@ -117,12 +118,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Seventeen required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Twenty required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 17,
-            "selected_tests": 17,
+            "discovered_tests": 20,
+            "selected_tests": 20,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -163,7 +164,7 @@ class FixtureRepo:
             self.review_revision = git(self.root, "rev-parse", "HEAD")
         if final_status == "done":
             if historical_review:
-                self.record_prior_changes_review()
+                self.record_prior_changes_review(resolve=resolve_historical_review)
             self.finish_review()
         self.final_status = final_status
 
@@ -205,7 +206,7 @@ class FixtureRepo:
         self.set_status("done", "fixture-agent", "Preserve the historical result")
         self.commit("synthetic done")
 
-    def record_prior_changes_review(self) -> None:
+    def record_prior_changes_review(self, *, resolve: bool = True) -> None:
         report = self.root / "work" / "reviews" / "W-900-changes-required.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(
@@ -225,14 +226,26 @@ class FixtureRepo:
             "reasoning_effort": None,
             "findings": ["W-900-R1"],
         })
+        if resolve:
+            data["resolutions"].append({
+                "finding_id": "W-900-R1",
+                "disposition": "resolved",
+                "evidence": "Synthetic implementation checkpoint fixes the reported issue.",
+                "approval_ref": None,
+            })
+        write_record(self.root, data, body)
+        self.commit("synthetic resolved review finding")
+
+    def append_prior_resolution(self) -> None:
+        data, body = read_record(self.root)
         data["resolutions"].append({
             "finding_id": "W-900-R1",
             "disposition": "resolved",
-            "evidence": "Synthetic implementation checkpoint fixes the reported issue.",
+            "evidence": "Synthetic post-transition resolution; it cannot repair the historical done snapshot.",
             "approval_ref": None,
         })
         write_record(self.root, data, body)
-        self.commit("synthetic resolved review finding")
+        self.commit("synthetic late review finding resolution")
 
     def close(self) -> None:
         self.temp.cleanup()
@@ -454,6 +467,85 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertEqual(data_after["evidence"][0], recorded)
             self.assertTrue(any(f["severity"] == "warning" and f["rule_id"] in {"WRK008", "WRK009"} for f in result["findings"]), result)
             self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
+        finally:
+            repo.close()
+
+    def test_rubric_change_does_not_rewrite_historical_completion(self) -> None:
+        repo = FixtureRepo()
+        try:
+            procedure = repo.root / "work" / "review-procedure.md"
+            text = procedure.read_text(encoding="utf-8")
+            procedure.write_text(text.replace("review-rubric-v1", "review-rubric-v2"), encoding="utf-8")
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("historical completion used rubric review-rubric-v1" in finding["message"]
+                    for finding in findings(result, "WRK009")), result,
+            )
+            self.assertFalse(
+                [finding for finding in result["findings"] if finding["severity"] in {"blocking", "missing", "unable"}],
+                result,
+            )
+        finally:
+            repo.close()
+
+    def test_fresh_evidence_supersedes_stale_history_but_stale_latest_blocks(self) -> None:
+        refreshed = FixtureRepo("in_review")
+        try:
+            original, _ = read_record(refreshed.root)
+            previous = original["evidence"][0].copy()
+            with (refreshed.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# changed input before refreshed evidence\n")
+            refreshed.commit("synthetic evidence input changed")
+            data, body = read_record(refreshed.root)
+            data["evidence"].append(previous.copy())
+            data["evidence"][-1]["source_commit"] = git(refreshed.root, "rev-parse", "HEAD")
+            write_record(refreshed.root, data, body)
+            refreshed.commit("synthetic fresh evidence appended")
+            result = validate(refreshed.root, "main")
+            current = read_record(refreshed.root)[0]
+            self.assertEqual(current["evidence"][0], previous)
+            self.assertEqual(len(current["evidence"]), 2)
+            self.assertTrue(any("superseded by a later result" in finding["message"]
+                                for finding in findings(result, "WRK008")), result)
+            self.assertFalse([finding for finding in result["findings"]
+                              if finding["severity"] in {"blocking", "missing", "unable"}], result)
+            refreshed.review_revision = git(refreshed.root, "rev-parse", "HEAD")
+            refreshed.finish_review()
+            result = validate(refreshed.root, "main")
+            roadmap = (refreshed.root / "roadmap.md").read_text(encoding="utf-8")
+            self.assertIn("| W-900 | [Synthetic negative experiment](work/W-900.md) | P1 | done |", roadmap)
+            self.assertFalse([finding for finding in result["findings"]
+                              if finding["severity"] in {"blocking", "missing", "unable"}], result)
+        finally:
+            refreshed.close()
+
+        stale = FixtureRepo("in_review")
+        try:
+            original, _ = read_record(stale.root)
+            previous = original["evidence"][0].copy()
+            with (stale.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# changed input before a stale latest result\n")
+            stale.commit("synthetic evidence input changed")
+            data, body = read_record(stale.root)
+            data["evidence"].append(previous.copy())
+            write_record(stale.root, data, body)
+            stale.commit("synthetic stale latest evidence appended")
+            result = validate(stale.root, "main")
+            self.assertTrue(findings(result, "WRK008"), result)
+            self.assertTrue([finding for finding in result["findings"]
+                             if finding["severity"] in {"missing", "blocking"}], result)
+        finally:
+            stale.close()
+
+    def test_resolution_added_after_done_does_not_repair_transition(self) -> None:
+        repo = FixtureRepo(historical_review=True, resolve_historical_review=False)
+        try:
+            repo.append_prior_resolution()
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("done transition lacked explicit resolution evidence" in finding["message"]
+                    for finding in findings(result, "WRK013")), result,
+            )
         finally:
             repo.close()
 

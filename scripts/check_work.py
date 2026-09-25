@@ -553,7 +553,10 @@ class Checker:
         entries = data.get("evidence", [])
         if not isinstance(entries, list):
             return False
-        for evidence in entries:
+        latest_indices = self._latest_evidence_indices(entries)
+        for index, evidence in enumerate(entries):
+            if index not in latest_indices:
+                continue
             if not isinstance(evidence, dict) or evidence.get("criterion_id") not in required:
                 valid = False
                 continue
@@ -598,6 +601,41 @@ class Checker:
         if required - covered:
             valid = False
         return valid
+
+    @staticmethod
+    def _latest_evidence_indices(entries: list[Any]) -> set[int]:
+        """Return the last append-only result for each criterion/configured-check pair."""
+        latest: dict[tuple[str, str], int] = {}
+        for index, evidence in enumerate(entries):
+            if not isinstance(evidence, dict):
+                continue
+            criterion_id = evidence.get("criterion_id")
+            check_id = evidence.get("check_id")
+            if isinstance(criterion_id, str) and isinstance(check_id, str):
+                latest[(criterion_id, check_id)] = index
+        return set(latest.values()) | {
+            index for index, evidence in enumerate(entries) if not isinstance(evidence, dict)
+        }
+
+    @staticmethod
+    def _unresolved_review_finding_ids(data: dict[str, Any]) -> set[str]:
+        review_findings: set[str] = set()
+        reviews = data.get("reviews", [])
+        if isinstance(reviews, list):
+            for review in reviews:
+                if isinstance(review, dict) and review.get("verdict") in {"changes_required", "unable_to_verify"}:
+                    findings = review.get("findings", [])
+                    if isinstance(findings, list):
+                        review_findings.update(finding for finding in findings if isinstance(finding, str))
+        resolutions = data.get("resolutions", [])
+        resolved_ids = set()
+        if isinstance(resolutions, list):
+            resolved_ids = {
+                resolution.get("finding_id")
+                for resolution in resolutions if isinstance(resolution, dict)
+                and resolution.get("disposition") == "resolved" and not is_placeholder(resolution.get("evidence"))
+            }
+        return review_findings - resolved_ids
 
     def _is_ancestor(self, ancestor: str, revision: str) -> bool:
         return subprocess.run(
@@ -695,6 +733,9 @@ class Checker:
         if status == "done":
             if not self._history_evidence_complete(commit, item_id, data):
                 self.add("WRK007", "blocking", "done transition lacked complete applicable evidence at that commit", item_id, path="roadmap.md")
+            unresolved = self._unresolved_review_finding_ids(data)
+            if unresolved:
+                self.add("WRK013", "blocking", f"done transition lacked explicit resolution evidence for: {', '.join(sorted(unresolved))}", item_id, path="roadmap.md")
             reviews = data.get("reviews", [])
             review = reviews[-1] if isinstance(reviews, list) and reviews else None
             ready_review = (
@@ -1152,13 +1193,17 @@ class Checker:
         required = {c.get("id") for c in data.get("criteria", []) if isinstance(c, dict) and c.get("required") is True}
         entries = data.get("evidence", []) if isinstance(data.get("evidence"), list) else []
         covered: set[str] = set()
-        for ev in entries:
+        latest_indices = self._latest_evidence_indices(entries)
+        for index, ev in enumerate(entries):
             if not isinstance(ev, dict):
                 self.add("WRK007", "blocking", "evidence must be an object", item_id, path=rel)
                 continue
             cid = ev.get("criterion_id")
             if cid not in required:
                 self.add("WRK007", "blocking", f"evidence references non-required/unknown criterion {cid}", item_id, str(cid) if cid else None, rel)
+                continue
+            if index not in latest_indices:
+                self.add("WRK008", "warning", f"historical evidence is superseded by a later result for {ev.get('check_id')}; retained for history", item_id, cid, rel)
                 continue
             check = self.checks.get(ev.get("check_id"))
             review_method = self.review_methods.get(ev.get("check_id"))
@@ -1242,10 +1287,11 @@ class Checker:
             procedure = ""
         rubric_match = re.search(r"(?m)^Rubric version: `([a-z0-9-]+)`\s*$", procedure)
         current_rubric = rubric_match.group(1) if rubric_match else None
+        completion_rubric = self._rubric_version_at(done_at) if self.roadmap[item_id]["status"] == "done" else current_rubric
+        historical_done = self.roadmap[item_id]["status"] == "done" and (done_at != self.head_sha or self.dirty)
         reviews = data.get("reviews", []) if isinstance(data.get("reviews"), list) else []
         latest_review_index = len(reviews) - 1
         valid_ready = False
-        unresolved_review_findings: set[str] = set()
         for review_index, review in enumerate(reviews):
             if not isinstance(review, dict):
                 continue
@@ -1271,10 +1317,10 @@ class Checker:
             if not baseline_matches:
                 severity = "blocking" if current_review else "warning"
                 self.add("WRK009", severity, "review must cover the accepted criteria baseline", item_id, path=rel)
-            rubric_matches = bool(current_rubric and review.get("rubric_version") == current_rubric)
+            rubric_matches = bool(completion_rubric and review.get("rubric_version") == completion_rubric)
             if not rubric_matches:
-                severity = "blocking" if current_review else "warning"
-                self.add("WRK009", severity, "review rubric differs from the current rubric; inspect historical completion or repeat review", item_id, path=rel)
+                severity = "blocking" if current_review and not historical_done else "warning"
+                self.add("WRK009", severity, "review rubric differs from the rubric governing the completion claim; inspect historical assurance", item_id, path=rel)
             later = {
                 p.replace("\\", "/")
                 for p in git(self.root, "diff", "--name-only", f"{revision}..{done_at}", check=False).splitlines()
@@ -1285,9 +1331,6 @@ class Checker:
                 self.add("WRK009", "blocking", "latest review assessed an older revision with substantive changes afterward", item_id, path=rel)
             if current_review and review.get("role") in {"author", "self"}:
                 self.add("WRK009", "blocking", "latest review cannot be an author/self-review", item_id, path=rel)
-            if review.get("verdict") == "changes_required":
-                findings = review.get("findings", [])
-                unresolved_review_findings.update(x for x in findings if isinstance(x, str))
             if (current_review and review.get("role") in {"independent", "domain_owner"}
                     and review.get("verdict") == "ready" and not review.get("findings")
                     and baseline_matches and rubric_matches and not substantive_after):
@@ -1295,11 +1338,11 @@ class Checker:
         after_done = git(self.root, "diff", "--name-only", f"{done_at}..{self.head_sha}", check=False).splitlines()
         if after_done or (self.dirty and self.changed_paths):
             self.add("WRK009", "warning", "historical completion and review remain recorded; inspect current changes before making a new completion claim", item_id, path=rel)
+        if self.roadmap[item_id]["status"] == "done" and current_rubric != completion_rubric:
+            self.add("WRK009", "warning", f"historical completion used rubric {completion_rubric}; current rubric is {current_rubric}; assess current assurance separately", item_id, path=rel)
         if not valid_ready:
             self.add("WRK009", "missing", "done requires the latest recorded review to be independent/domain-owner ready and cover the current revision", item_id, path=rel)
-        resolutions = data.get("resolutions", []) if isinstance(data.get("resolutions"), list) else []
-        resolved_ids = {r.get("finding_id") for r in resolutions if isinstance(r, dict) and r.get("disposition") == "resolved" and not is_placeholder(r.get("evidence"))}
-        unresolved = unresolved_review_findings - resolved_ids
+        unresolved = self._unresolved_review_finding_ids(data)
         if unresolved:
             self.add("WRK013", "blocking", f"review findings lack explicit resolution evidence: {', '.join(sorted(unresolved))}", item_id, path=rel)
 
