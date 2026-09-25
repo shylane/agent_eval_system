@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "preferred_model": null,
+  "reasoning_effort": null,
+  "required_reviewer_role": "independent",
+  "fallback": "If the chosen reviewer or effort is unavailable, select a sufficiently capable reviewer explicitly or preserve unable_to_verify. Never silently substitute a weaker reviewer."
+}

@@ -15,3 +15,7 @@ Current next step: choose the first synthetic write-capable workflow and establi
 Before implementation, write a short `pilot_brief.md`: chosen synthetic workflow and why; intended users and permitted/forbidden outcomes; concrete state and side effects; one ordered multi-turn failure to reproduce; reference behavior and independent check; baseline tool or harness; budget; and known gaps. Link the eventual dated result from the experiment ledger. The workflow choice is still open. The first pilot succeeds if another engineer can reproduce a consequential result and understand its limits and cost; it does **not** need the later app dossier, autonomous world building, or a startup thesis.
 
 Existing healthcare claims work elsewhere in this repository is background and may offer evaluation lessons; it is not this project's implementation. Keep new code, tests, results, and decisions under this folder unless shared infrastructure genuinely belongs at the repository level.
+
+## Project work
+
+Use [roadmap.md](roadmap.md) to select work and the [work-record contract](work/README.md) to create or resume it. Detailed scope and evidence live in linked `work/` records. A proposed item does not authorize implementation.
