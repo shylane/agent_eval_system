@@ -23,6 +23,8 @@ Nested fields are exact: evidence `{criterion_id, source_commit, source_fingerpr
 
 Append evidence, resolution, and review entries; preserve earlier records and reports. For each `(criterion_id, check_id)`, the latest evidence row is current and earlier rows remain historical. Reviews are chronological, and the last entry governs current review status. Explicit finding resolutions must be present at the done transition; later resolutions cannot repair it. A later rubric change does not erase a historical completion.
 
+Local freshness checks include staged, unstaged, and untracked changes. The checker resolves historical done commits from the selected comparison base's first-parent history; if that history is unavailable, it reports unable to check.
+
 `verification.json` has `schema_version: 1`, `checks`, and `review_methods`. A command check has exactly `{id, argv, test_expectation, minimum_discovered, watched_paths}` plus optional `timeout_seconds` or `kind: "command"`; `argv` is a nonempty string array and never a shell expression. A review method has exactly `{id, procedure, report_template, required_reviewer_role}` and is a documented, non-executable procedure. `reviewer-config.json` has exactly `{schema_version, preferred_model, reasoning_effort, required_reviewer_role, fallback}`; null model/effort means no preference is set.
 
 `accepted_criteria_commit` is the fixed acceptance anchor from initial authorization. Never move it to conceal later wording changes; record later accepted amendments as decisions against that anchor. `implementation_base_commit` separately records the implementation starting snapshot.

@@ -118,12 +118,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Twenty required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Twenty-two required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 20,
-            "selected_tests": 20,
+            "discovered_tests": 22,
+            "selected_tests": 22,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -470,6 +470,32 @@ class WorkCheckerFixtures(unittest.TestCase):
         finally:
             repo.close()
 
+    def test_completion_already_in_base_preserves_historical_assurance(self) -> None:
+        repo = FixtureRepo()
+        try:
+            git(repo.root, "switch", "main")
+            git(repo.root, "merge", "--ff-only", "fixture-work")
+            git(repo.root, "switch", "-c", "post-completion-followup")
+            with (repo.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# committed regression check after historical completion\n")
+            procedure = repo.root / "work" / "review-procedure.md"
+            procedure.write_text(
+                procedure.read_text(encoding="utf-8").replace("review-rubric-v1", "review-rubric-v2"),
+                encoding="utf-8",
+            )
+            repo.commit("synthetic follow-up after completion was merged")
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("historical completion used rubric review-rubric-v1" in finding["message"]
+                    for finding in findings(result, "WRK009")), result,
+            )
+            self.assertFalse(
+                [finding for finding in result["findings"] if finding["severity"] in {"blocking", "missing", "unable"}],
+                result,
+            )
+        finally:
+            repo.close()
+
     def test_rubric_change_does_not_rewrite_historical_completion(self) -> None:
         repo = FixtureRepo()
         try:
@@ -587,6 +613,27 @@ class WorkCheckerFixtures(unittest.TestCase):
             result = validate(repo.root, "main")
             self.assertTrue(
                 any("in_review transition lacked complete fresh evidence" in f["message"] for f in findings(result, "WRK007")),
+                result,
+            )
+        finally:
+            repo.close()
+
+    def test_staged_watched_input_invalidates_local_evidence(self) -> None:
+        repo = FixtureRepo("in_review")
+        try:
+            with (repo.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# staged watched input must invalidate evidence\n")
+            git(repo.root, "add", "tests/test_behavior.py")
+            self.assertEqual(git(repo.root, "diff", "--name-only"), "")
+            self.assertEqual(git(repo.root, "diff", "--cached", "--name-only"), "tests/test_behavior.py")
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK008" and finding["severity"] == "missing"
+                    and "tests/test_behavior.py" in finding["message"] for finding in result["findings"]),
+                result,
+            )
+            self.assertTrue(
+                any("tests/test_behavior.py" in finding["message"] for finding in findings(result, "WRK011")),
                 result,
             )
         finally:

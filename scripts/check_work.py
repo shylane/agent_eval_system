@@ -209,8 +209,9 @@ class Checker:
             self.changed_paths = {p.replace("\\", "/") for p in changed.splitlines() if p}
             if self.dirty:
                 dirty_paths = git(self.root, "diff", "--name-only", check=False).splitlines()
+                staged_paths = git(self.root, "diff", "--cached", "--name-only", check=False).splitlines()
                 untracked = git(self.root, "ls-files", "--others", "--exclude-standard", check=False).splitlines()
-                self.changed_paths.update(p.replace("\\", "/") for p in dirty_paths + untracked if p)
+                self.changed_paths.update(p.replace("\\", "/") for p in dirty_paths + staged_paths + untracked if p)
             return True
         except Exception as exc:  # Git context is required for immutable baselines and status history.
             self.add("WRK016", "unable", f"Git context unavailable: {exc}")
@@ -437,6 +438,26 @@ class Checker:
         try:
             base_text = git(self.root, "show", f"{self.base_sha}:roadmap.md", check=False)
             previous, _ = parse_roadmap(base_text) if base_text else ({}, [])
+            if any(row.get("status") == "done" for row in previous.values()):
+                base_history = git(
+                    self.root, "rev-list", "--first-parent", "--reverse", self.base_sha, "--", "roadmap.md", check=False
+                ).splitlines()
+                history_status: dict[str, str] = {}
+                completed_at_base: dict[str, str] = {}
+                for history_commit in base_history:
+                    history_text = git(self.root, "show", f"{history_commit}:roadmap.md", check=False)
+                    history_rows, _ = parse_roadmap(history_text) if history_text else ({}, [])
+                    for item_id, row in history_rows.items():
+                        if row.get("status") == "done" and history_status.get(item_id) != "done":
+                            completed_at_base[item_id] = history_commit
+                    history_status = {item_id: row.get("status", "") for item_id, row in history_rows.items()}
+                for item_id, row in previous.items():
+                    if row.get("status") == "done":
+                        completion_commit = completed_at_base.get(item_id)
+                        if completion_commit:
+                            self.done_commits[item_id] = completion_commit
+                        else:
+                            self.add("WRK016", "unable", "cannot locate the historical done transition in first-parent history through the comparison base", item_id, path="roadmap.md")
             commits = git(self.root, "rev-list", "--first-parent", "--reverse", f"{self.base_sha}..{self.head_sha}", check=False).splitlines()
             previous_commit = self.base_sha
             for commit in commits:
@@ -1066,6 +1087,7 @@ class Checker:
         names = git(self.root, "diff", "--name-only", f"{commit}..{self.head_sha}", check=False).splitlines()
         if self.dirty:
             names += git(self.root, "diff", "--name-only", check=False).splitlines()
+            names += git(self.root, "diff", "--cached", "--name-only", check=False).splitlines()
             names += git(self.root, "ls-files", "--others", "--exclude-standard", check=False).splitlines()
         normalized = {n.replace("\\", "/") for n in names if n}
         return {name for name in normalized if any(fnmatch.fnmatch(name, pat) for pat in watch)}
