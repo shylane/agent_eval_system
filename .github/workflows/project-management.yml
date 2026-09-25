@@ -55,7 +55,7 @@ jobs:
         if: ${{ always() && hashFiles('artifacts/project-verification.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: project-verification-${{ github.sha }}
+          name: project-verification-${{ github.event.pull_request.head.sha || github.sha }}
           path: artifacts/project-verification.json
           if-no-files-found: error
           retention-days: 30
