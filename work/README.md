@@ -43,7 +43,7 @@ Do not create an item for every question or trivial edit. Minor corrections can 
 
 ## Completion gate
 
-`done` requires applicable, successful, fresh evidence for every required criterion; required tests discovered and selected with no required skips; explicit resolution of blocking review findings; and a required review with verdict `ready` covering the proposed implementation revision and accepted baseline. A negative experiment finding can satisfy the work contract when the agreed method and reporting criteria passed. A review recommendation does not authorize merge.
+`done` requires applicable, successful, fresh evidence for every required criterion; required tests discovered and selected with no required skips; explicit resolution of blocking review findings; and a required review with verdict `ready` covering the proposed implementation revision and accepted baseline. Commit the `done` transition before it can count complete so the checker can inspect its exact evidence and review snapshot. A negative experiment finding can satisfy the work contract when the agreed method and reporting criteria passed. A review recommendation does not authorize merge.
 
 Before proposing completion, run:
 

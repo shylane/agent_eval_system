@@ -171,8 +171,10 @@ class Checker:
         self.base_sha = ""
         self.head_sha = ""
         self.changed_paths: set[str] = set()
+        self.working_tree_paths: set[str] = set()
         self.dirty = False
         self.done_commits: dict[str, str] = {}
+        self.uncommitted_done_items: set[str] = set()
         self.history_configs: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
         self.record_cache: dict[tuple[str, str], tuple[dict[str, Any] | None, str]] = {}
 
@@ -211,7 +213,8 @@ class Checker:
                 dirty_paths = git(self.root, "diff", "--name-only", check=False).splitlines()
                 staged_paths = git(self.root, "diff", "--cached", "--name-only", check=False).splitlines()
                 untracked = git(self.root, "ls-files", "--others", "--exclude-standard", check=False).splitlines()
-                self.changed_paths.update(p.replace("\\", "/") for p in dirty_paths + staged_paths + untracked if p)
+                self.working_tree_paths = {p.replace("\\", "/") for p in dirty_paths + staged_paths + untracked if p}
+                self.changed_paths.update(self.working_tree_paths)
             return True
         except Exception as exc:  # Git context is required for immutable baselines and status history.
             self.add("WRK016", "unable", f"Git context unavailable: {exc}")
@@ -510,7 +513,12 @@ class Checker:
                 if old != row["status"] and not self._transition_ok(old, row["status"]):
                     self.add("WRK003", "blocking", f"invalid working-tree status transition {old or 'new'} -> {row['status']}", item_id, path="roadmap.md")
                 if row["status"] == "done" and old != "done":
-                    self.done_commits[item_id] = self.head_sha
+                    self.uncommitted_done_items.add(item_id)
+                    self.add(
+                        "WRK003", "blocking",
+                        "done transition must be committed so its evidence and review snapshot can be verified",
+                        item_id, path="roadmap.md",
+                    )
         except Exception as exc:
             self.add("WRK016", "unable", f"Cannot inspect status history: {type(exc).__name__}: {exc!r}", path="roadmap.md")
 
@@ -1210,7 +1218,10 @@ class Checker:
 
     def _check_evidence(self, item_id: str, data: dict[str, Any], path: Path) -> None:
         status = self.roadmap[item_id]["status"]
-        historical_done = status == "done" and (self.done_commits.get(item_id) != self.head_sha or self.dirty)
+        historical_done = (
+            status == "done" and item_id not in self.uncommitted_done_items
+            and (self.done_commits.get(item_id) != self.head_sha or self.dirty)
+        )
         rel = path.relative_to(self.root).as_posix()
         required = {c.get("id") for c in data.get("criteria", []) if isinstance(c, dict) and c.get("required") is True}
         entries = data.get("evidence", []) if isinstance(data.get("evidence"), list) else []
@@ -1310,7 +1321,10 @@ class Checker:
         rubric_match = re.search(r"(?m)^Rubric version: `([a-z0-9-]+)`\s*$", procedure)
         current_rubric = rubric_match.group(1) if rubric_match else None
         completion_rubric = self._rubric_version_at(done_at) if self.roadmap[item_id]["status"] == "done" else current_rubric
-        historical_done = self.roadmap[item_id]["status"] == "done" and (done_at != self.head_sha or self.dirty)
+        historical_done = (
+            self.roadmap[item_id]["status"] == "done" and item_id not in self.uncommitted_done_items
+            and (done_at != self.head_sha or self.dirty)
+        )
         reviews = data.get("reviews", []) if isinstance(data.get("reviews"), list) else []
         latest_review_index = len(reviews) - 1
         valid_ready = False
@@ -1348,7 +1362,13 @@ class Checker:
                 for p in git(self.root, "diff", "--name-only", f"{revision}..{done_at}", check=False).splitlines()
                 if p
             }
-            substantive_after = bool(self._record_metadata_only_between(revision, done_at, later, item_id))
+            if item_id in self.uncommitted_done_items:
+                later.update(self.working_tree_paths)
+                substantive_after = bool(self._record_metadata_only_since(
+                    revision, later, item_id, path.read_text(encoding="utf-8")
+                ))
+            else:
+                substantive_after = bool(self._record_metadata_only_between(revision, done_at, later, item_id))
             if current_review and review.get("verdict") == "ready" and substantive_after:
                 self.add("WRK009", "blocking", "latest review assessed an older revision with substantive changes afterward", item_id, path=rel)
             if current_review and review.get("role") in {"author", "self"}:

@@ -118,12 +118,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Twenty-two required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Twenty-three required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 22,
-            "selected_tests": 22,
+            "discovered_tests": 23,
+            "selected_tests": 23,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -183,6 +183,11 @@ class FixtureRepo:
         git(self.root, "commit", "-m", message)
 
     def finish_review(self) -> None:
+        self.record_ready_review()
+        self.set_status("done", "fixture-agent", "Preserve the historical result")
+        self.commit("synthetic done")
+
+    def record_ready_review(self) -> None:
         report = self.root / "work" / "reviews" / "W-900-review.md"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(
@@ -203,8 +208,7 @@ class FixtureRepo:
             "findings": [],
         })
         write_record(self.root, data, body)
-        self.set_status("done", "fixture-agent", "Preserve the historical result")
-        self.commit("synthetic done")
+        self.commit("synthetic ready review")
 
     def record_prior_changes_review(self, *, resolve: bool = True) -> None:
         report = self.root / "work" / "reviews" / "W-900-changes-required.md"
@@ -263,6 +267,34 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertEqual(result["exit_code"], 0, result)
             self.assertNotIn("failure", result["outcome"])
             self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
+        finally:
+            repo.close()
+
+    def test_uncommitted_done_transition_cannot_use_stale_evidence_or_review(self) -> None:
+        repo = FixtureRepo("in_review")
+        try:
+            repo.record_ready_review()
+            with (repo.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# staged after the review; must invalidate completion\n")
+            git(repo.root, "add", "tests/test_behavior.py")
+            repo.set_status("done", "fixture-agent", "Propose synthetic completion")
+
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("done transition must be committed" in finding["message"]
+                    for finding in findings(result, "WRK003")),
+                result,
+            )
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK008" and finding["severity"] in {"missing", "blocking"}
+                    and "tests/test_behavior.py" in finding["message"] for finding in result["findings"]),
+                result,
+            )
+            self.assertTrue(
+                any("review assessed an older revision with substantive changes afterward" in finding["message"]
+                    for finding in findings(result, "WRK009")),
+                result,
+            )
         finally:
             repo.close()
 

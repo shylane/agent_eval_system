@@ -45,6 +45,6 @@
 3. Confirm the latest appended evidence for each required criterion/configured check is applicable, fresh, and passing; required tests were discovered/selected with no skips; blocking findings have explicit resolutions before the done transition.
 4. Set `in_review` and request a fresh independent review using [review-procedure.md](review-procedure.md). Inspect primary evidence.
 5. Append the report and review object in chronological order; preserve earlier entries. Resolve every blocking finding with evidence. A later `changes_required` or `unable_to_verify` entry supersedes any earlier ready recommendation; review fixes once.
-6. Mark `done` only when checker prerequisites pass and the latest review entry is `ready`, independent/domain-owner, finding-free, and fresh for the proposed revision. Otherwise remain `in_review` or `blocked` with a next action.
+6. Mark `done` only when checker prerequisites pass and the latest review entry is `ready`, independent/domain-owner, finding-free, and fresh for the proposed revision. Commit the transition and rerun the checker against that commit; an uncommitted `done` row is mechanically blocked because its exact snapshot is not verifiable. Otherwise remain `in_review` or `blocked` with a next action.
 
 **Success:** fresh applicable evidence plus ready independent review. **Failure:** missing/stale/unable evidence, skipped tests, uncorroborated approval, or open findings means not done. A negative experiment result passes if the agreed method/reporting contract passed.
