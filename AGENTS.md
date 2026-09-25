@@ -14,3 +14,5 @@
 - Keep each application's product-intent contract versioned and owner-approved. Treat scope classifications and feature ideas as reviewable hypotheses; never delete reachable safety cases or retroactively exclude failures to improve a score.
 - Keep the later app-dossier idea separate from the first pilot. If explored, distinguish owner-approved intent, observed evidence, and the lab's hypotheses; do not promote self-written notes into authority.
 - Do not use employer or customer data in public examples without appropriate clearance. Keep unrelated repository work untouched.
+
+- Keep fixer and reviewer models different for each reviewed revision. If a first fix pass on Astra (gpt-6-astra) findings leaves issues unresolved or regresses another finding, delegate bounded fixes to Sol-based subagents (for example, gpt-6-sol) under one integration owner. If those fixes still do not converge, escalate the remaining fixes to Astra and assign a non-Astra reviewer. Record model/effort when available; if a distinct reviewer is unavailable, leave review pending or unable to verify. Follow [work/review-procedure.md](work/review-procedure.md).
