@@ -7,10 +7,12 @@
         "run",
         "--no-project",
         "python",
-        "scripts/check_work.py"
+        "scripts/check_work.py",
+        "--work-id",
+        "W-000"
       ],
       "discovered_tests": null,
-      "elapsed_seconds": 0.224,
+      "elapsed_seconds": 0.205,
       "exit_status": 0,
       "output": "work check: passed\nWRK011 review:roadmap.md: test/fixture/expected-output paths changed; inspect behavior and selection: scripts/test_work_checker.py, tests/fixtures/work_records/README.md, tests/fixtures/work_records/valid_completion/README.md, tests/fixtures/work_records/valid_completion/case.json, tests/fixtures/work_records/valid_completion/roadmap.md, tests/fixtures/work_records/valid_completion/src/behavior.txt, tests/fixtures/work_records/valid_completion/tests/test_behavior.py, tests/fixtures/work_records/valid_completion/verification.json, tests/fixtures/work_records/valid_completion/work/W-900.md, tests/fixtures/work_records/valid_completion/work/review-procedure.md, tests/fixtures/work_records/valid_completion/work/reviewer-config.json\nWRK012 review:roadmap.md: verification/checker/review/CI enforcement changed; require review against accepted rules: .github/workflows/project-management.yml, scripts/check_work.py, scripts/run_verification.py, verification.json, work/REVIEW_REPORT_TEMPLATE.md, work/policy.md, work/review-procedure.md, work/reviewer-config.json\n",
       "result": "pass",
@@ -43,9 +45,9 @@
         "scripts/test_work_checker.py"
       ],
       "discovered_tests": 10,
-      "elapsed_seconds": 1.956,
+      "elapsed_seconds": 1.962,
       "exit_status": 0,
-      "output": "..........\n----------------------------------------------------------------------\nRan 10 tests in 1.751s\n\nOK\nFIXTURE_SUMMARY {\"discovered\": 10, \"selected\": 10, \"skipped\": 0, \"failures\": 0}\n",
+      "output": "..........\n----------------------------------------------------------------------\nRan 10 tests in 1.705s\n\nOK\nFIXTURE_SUMMARY {\"discovered\": 10, \"selected\": 10, \"skipped\": 0, \"failures\": 0}\n",
       "result": "pass",
       "selected_tests": 10,
       "skipped_tests": 0,
@@ -63,7 +65,7 @@
     }
   ],
   "environment": "Linux",
-  "milestone": null,
+  "milestone": "W-000",
   "outcome": "passed",
   "python": "3.12.14",
   "runner": "scripts/run_verification.py",
