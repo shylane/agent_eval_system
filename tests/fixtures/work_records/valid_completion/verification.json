@@ -3,6 +3,6 @@
   "review_methods": [],
   "checks": [
     {"id":"record-integrity","argv":["python","scripts/check_work.py"],"test_expectation":false,"minimum_discovered":0,"watched_paths":["scripts/check_work.py","verification.json","work/policy.md","roadmap.md","work/**"]},
-    {"id":"checker-fixtures","argv":["python","scripts/test_work_checker.py"],"test_expectation":true,"minimum_discovered":14,"watched_paths":["scripts/**","tests/**","verification.json","work/policy.md"]}
+    {"id":"checker-fixtures","argv":["python","scripts/test_work_checker.py"],"test_expectation":true,"minimum_discovered":15,"watched_paths":["scripts/**","tests/**","verification.json","work/policy.md"]}
   ]
 }

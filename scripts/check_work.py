@@ -1227,9 +1227,12 @@ class Checker:
             if not current_rubric or review.get("rubric_version") != current_rubric:
                 severity = "warning" if historical_done else "blocking"
                 self.add("WRK009", severity, "review rubric differs from the current rubric; inspect historical completion or repeat review", item_id, path=rel)
-            later = git(self.root, "diff", "--name-only", f"{revision}..{done_at}", check=False).splitlines()
-            allowed_bookkeeping = {"roadmap.md", rel}
-            if any(p.replace("\\", "/") not in allowed_bookkeeping and not p.replace("\\", "/").startswith("work/reviews/") for p in later):
+            later = {
+                p.replace("\\", "/")
+                for p in git(self.root, "diff", "--name-only", f"{revision}..{done_at}", check=False).splitlines()
+                if p
+            }
+            if self._record_metadata_only_between(revision, done_at, later, item_id):
                 self.add("WRK009", "blocking", "review assessed an older revision with substantive changes afterward", item_id, path=rel)
             after_done = git(self.root, "diff", "--name-only", f"{done_at}..{self.head_sha}", check=False).splitlines()
             if after_done or (self.dirty and self.changed_paths):

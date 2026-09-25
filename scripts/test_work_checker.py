@@ -103,12 +103,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Fourteen required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Fifteen required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 14,
-            "selected_tests": 14,
+            "discovered_tests": 15,
+            "selected_tests": 15,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -304,6 +304,34 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertEqual(data_after["evidence"][0], recorded)
             self.assertTrue(any(f["severity"] == "warning" and f["rule_id"] in {"WRK008", "WRK009"} for f in result["findings"]), result)
             self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
+        finally:
+            repo.close()
+
+    def test_substantive_item_edit_after_review_invalidates_review(self) -> None:
+        repo = FixtureRepo("in_review")
+        try:
+            record_path = repo.root / "work" / "W-900.md"
+            record = record_path.read_text(encoding="utf-8")
+            record = record.replace(
+                "Included: temporary version-1 records, controlled fixture mutations, and assertions on checker findings.",
+                "Included: expanded behavior beyond the scope assessed by the reviewer.",
+            )
+            record_path.write_text(record, encoding="utf-8")
+            repo.commit("synthetic scope edit after review")
+
+            # Record fresh evidence for the changed inputs while deliberately keeping
+            # the earlier review revision to verify that completion still rejects it.
+            data, body = read_record(repo.root)
+            data["evidence"][0]["source_commit"] = git(repo.root, "rev-parse", "HEAD")
+            write_record(repo.root, data, body)
+            repo.commit("synthetic refreshed evidence")
+            repo.finish_review()
+
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("review assessed an older revision with substantive changes afterward" in f["message"] for f in findings(result, "WRK009")),
+                result,
+            )
         finally:
             repo.close()
 
