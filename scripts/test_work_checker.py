@@ -65,11 +65,11 @@ class FixtureRepo:
 
     def __init__(self, final_status: str = "done", integrity_watches_work: bool = False,
                  structured_review: bool = False, historical_review: bool = False,
-                 resolve_historical_review: bool = True):
+                 resolve_historical_review: bool = True, check_without_tests: bool = False):
         self.temp = tempfile.TemporaryDirectory(prefix="work-record-fixture-")
         self.root = Path(self.temp.name)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
-        if integrity_watches_work or structured_review:
+        if integrity_watches_work or structured_review or check_without_tests:
             config_path = self.root / "verification.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             if structured_review:
@@ -85,6 +85,8 @@ class FixtureRepo:
                 (self.root / "work" / "structured-review-template.md").write_text(
                     "Synthetic fixture report template.\n", encoding="utf-8"
                 )
+            if check_without_tests:
+                config["checks"][1]["test_expectation"] = False
             config["checks"][0]["watched_paths"].extend(["roadmap.md", "work/**"])
             config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         git(self.root, "init", "--initial-branch=main")
@@ -118,13 +120,15 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Twenty-four required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": ("Synthetic configured check passed; test discovery is not applicable."
+                        if check_without_tests else
+                        "Twenty-five required synthetic fixture tests were discovered, selected, and passed."),
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 24,
-            "selected_tests": 24,
-            "skipped_tests": 0,
+            "discovered_tests": None if check_without_tests else 25,
+            "selected_tests": None if check_without_tests else 25,
+            "skipped_tests": None if check_without_tests else 0,
         }
         data, body = read_record(self.root)
         data["evidence"] = [self.evidence.copy()]
@@ -548,7 +552,8 @@ class WorkCheckerFixtures(unittest.TestCase):
             )
             self.assertTrue(
                 any(finding["rule_id"] == "WRK008" and finding["severity"] == "warning"
-                    and "retired verification ID" in finding["message"] for finding in result["findings"]),
+                    and "current assurance needs re-verification" in finding["message"]
+                    for finding in result["findings"]),
                 result,
             )
         finally:
@@ -563,6 +568,49 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertTrue(
                 any(finding["rule_id"] == "WRK007" and finding["severity"] == "blocking"
                     and "unknown configured check ID" in finding["message"] for finding in result["findings"]),
+                result,
+            )
+        finally:
+            active.close()
+
+    def test_changed_verification_definition_preserves_history_but_requires_current_evidence(self) -> None:
+        historical = FixtureRepo(check_without_tests=True)
+        try:
+            git(historical.root, "switch", "main")
+            git(historical.root, "merge", "--ff-only", "fixture-work")
+            git(historical.root, "switch", "-c", "post-completion-check-change")
+            config_path = historical.root / "verification.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["checks"][1]["test_expectation"] = True
+            config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            historical.commit("synthetic tighten existing check after completion")
+
+            result = validate(historical.root, "main")
+            self.assertFalse(
+                [finding for finding in result["findings"] if finding["severity"] in {"blocking", "missing", "unable"}],
+                result,
+            )
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK008" and finding["severity"] == "warning"
+                    and "current assurance needs re-verification" in finding["message"]
+                    for finding in result["findings"]),
+                result,
+            )
+        finally:
+            historical.close()
+
+        active = FixtureRepo("in_review")
+        try:
+            data, body = read_record(active.root)
+            data["evidence"][0]["discovered_tests"] = None
+            data["evidence"][0]["selected_tests"] = None
+            data["evidence"][0]["skipped_tests"] = None
+            write_record(active.root, data, body)
+            result = validate(active.root, "main")
+            self.assertTrue(
+                any(finding["rule_id"] == "WRK007" and finding["severity"] == "missing"
+                    and "discovered/selected/skipped counts" in finding["message"]
+                    for finding in result["findings"]),
                 result,
             )
         finally:

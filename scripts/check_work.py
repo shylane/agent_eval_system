@@ -1238,20 +1238,25 @@ class Checker:
             if index not in latest_indices:
                 self.add("WRK008", "warning", f"historical evidence is superseded by a later result for {ev.get('check_id')}; retained for history", item_id, cid, rel)
                 continue
-            check = self.checks.get(ev.get("check_id"))
-            review_method = self.review_methods.get(ev.get("check_id"))
-            if check is None and review_method is None and historical_done:
+            current_check = self.checks.get(ev.get("check_id"))
+            current_review_method = self.review_methods.get(ev.get("check_id"))
+            check = current_check
+            review_method = current_review_method
+            if historical_done:
                 completion_commit = self.done_commits.get(item_id)
                 if completion_commit:
                     historical_checks, historical_methods = self._verification_at_commit(completion_commit)
-                    check = historical_checks.get(ev.get("check_id"))
-                    review_method = historical_methods.get(ev.get("check_id"))
-                    if check is not None or review_method is not None:
-                        self.add(
-                            "WRK008", "warning",
-                            f"historical evidence used retired verification ID {ev.get('check_id')}; current assurance needs a currently configured check",
-                            item_id, cid, rel,
-                        )
+                    completion_check = historical_checks.get(ev.get("check_id"))
+                    completion_method = historical_methods.get(ev.get("check_id"))
+                    if completion_check is not None or completion_method is not None:
+                        if current_check != completion_check or current_review_method != completion_method:
+                            self.add(
+                                "WRK008", "warning",
+                                f"historical evidence uses verification rule {ev.get('check_id')} from its done revision; current assurance needs re-verification under current rules",
+                                item_id, cid, rel,
+                            )
+                        check = completion_check
+                        review_method = completion_method
             if check is None and review_method is None:
                 self.add("WRK007", "blocking", f"unknown configured check ID {ev.get('check_id')}", item_id, cid, rel)
                 continue
@@ -1261,6 +1266,9 @@ class Checker:
                 self.add("WRK008", "blocking", "evidence needs exactly one source commit or fingerprint", item_id, cid, rel)
                 continue
             watch = check.get("watched_paths", []) if check is not None else ["*"]
+            if historical_done and (current_check != check or current_review_method != review_method):
+                current_watch = current_check.get("watched_paths", []) if current_check is not None else ["*"]
+                watch = list(dict.fromkeys([*watch, *current_watch]))
             stale_paths: set[str] = set()
             historical_stale = False
             if source_commit:
