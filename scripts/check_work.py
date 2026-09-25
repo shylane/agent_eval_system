@@ -157,6 +157,11 @@ def is_placeholder(value: Any) -> bool:
     return not isinstance(value, str) or not value.strip() or bool(PLACEHOLDER.search(value))
 
 
+def is_one_of(value: Any, choices: set[str]) -> bool:
+    """Check untrusted JSON enum values without hashing malformed values."""
+    return isinstance(value, str) and value in choices
+
+
 class Checker:
     def __init__(self, root: Path, base_ref: str | None = None, focus_id: str | None = None):
         self.root = root.resolve()
@@ -232,27 +237,38 @@ class Checker:
         if type(config.get("schema_version")) is not int or config.get("schema_version") != 1 or not isinstance(config.get("checks"), list):
             self.add("WRK001", "unable", "verification.json schema_version must be 1 with a checks array", path="verification.json")
             return self.result()
+        seen_check_ids: set[str] = set()
         for check in config["checks"]:
-            if not isinstance(check, dict) or not isinstance(check.get("id"), str) or check["id"] in self.checks:
+            if not isinstance(check, dict) or not isinstance(check.get("id"), str) or check["id"] in seen_check_ids:
                 self.add("WRK001", "blocking", "verification check IDs must be unique objects", path="verification.json")
                 continue
+            seen_check_ids.add(check["id"])
             required = {"id", "argv", "test_expectation", "minimum_discovered", "watched_paths"}
             allowed = required | {"timeout_seconds", "kind"}
+            check_valid = True
             if not required <= set(check) or set(check) - allowed:
                 self.add("WRK001", "blocking", f"check {check['id']} fields differ from schema", path="verification.json")
-            self.checks[check["id"]] = check
+                check_valid = False
             if not re.fullmatch(r"[a-z][a-z0-9-]*", check["id"]):
                 self.add("WRK001", "blocking", f"invalid check ID {check['id']}", path="verification.json")
+                check_valid = False
             if not isinstance(check.get("argv"), list) or not check["argv"] or not all(isinstance(x, str) and x for x in check["argv"]):
                 self.add("WRK001", "blocking", f"check {check['id']} argv must be a nonempty array of strings", path="verification.json")
+                check_valid = False
             if type(check.get("test_expectation")) is not bool or type(check.get("minimum_discovered")) is not int or check.get("minimum_discovered", -1) < 0:
                 self.add("WRK001", "blocking", f"check {check['id']} has invalid test expectation/count", path="verification.json")
+                check_valid = False
             if check.get("kind", "command") != "command":
                 self.add("WRK001", "blocking", f"check {check['id']} kind must be command", path="verification.json")
+                check_valid = False
             if check.get("timeout_seconds") is not None and (type(check["timeout_seconds"]) is not int or check["timeout_seconds"] < 1):
                 self.add("WRK001", "blocking", f"check {check['id']} timeout_seconds must be a positive integer", path="verification.json")
+                check_valid = False
             if not isinstance(check.get("watched_paths"), list) or not all(isinstance(p, str) and p and not p.startswith(("/", "\\")) and ".." not in PurePosixPath(p).parts for p in check.get("watched_paths", [])):
                 self.add("WRK001", "blocking", f"check {check['id']} watched_paths must be repository-relative patterns", path="verification.json")
+                check_valid = False
+            if check_valid:
+                self.checks[check["id"]] = check
         review_methods = config.get("review_methods")
         if not isinstance(review_methods, list):
             self.add("WRK001", "blocking", "verification.json review_methods must be an array", path="verification.json")
@@ -263,7 +279,7 @@ class Checker:
                     self.add("WRK001", "blocking", "review methods need unique IDs and the exact declared fields", path="verification.json")
                     continue
                 self.review_methods[method["id"]] = method
-                if not re.fullmatch(r"[a-z][a-z0-9-]*", method["id"]) or method.get("required_reviewer_role") not in {"independent", "domain_owner"}:
+                if not re.fullmatch(r"[a-z][a-z0-9-]*", method["id"]) or not is_one_of(method.get("required_reviewer_role"), {"independent", "domain_owner"}):
                     self.add("WRK001", "blocking", f"review method {method['id']} has invalid ID or reviewer role", path="verification.json")
                 for field in ("procedure", "report_template"):
                     ref = method.get(field)
@@ -282,7 +298,7 @@ class Checker:
                 self.add("WRK001", "blocking", "preferred_model must be a model name or null", path="work/reviewer-config.json")
             if reviewer_config.get("reasoning_effort") is not None and not isinstance(reviewer_config.get("reasoning_effort"), str):
                 self.add("WRK001", "blocking", "reasoning_effort must be an effort name or null", path="work/reviewer-config.json")
-            if reviewer_config.get("required_reviewer_role") not in {"independent", "domain_owner"} or is_placeholder(reviewer_config.get("fallback")):
+            if not is_one_of(reviewer_config.get("required_reviewer_role"), {"independent", "domain_owner"}) or is_placeholder(reviewer_config.get("fallback")):
                 self.add("WRK001", "blocking", "reviewer role and unavailable-reviewer rule must be explicit", path="work/reviewer-config.json")
 
         roadmap_path = self.root / "roadmap.md"
@@ -576,7 +592,10 @@ class Checker:
         return self._commit_artifact_exists(commit, ref)
 
     def _history_evidence_complete(self, commit: str, item_id: str, data: dict[str, Any]) -> bool:
-        required = {c.get("id") for c in data.get("criteria", []) if isinstance(c, dict) and c.get("required") is True}
+        required = {
+            c.get("id") for c in data.get("criteria", [])
+            if isinstance(c, dict) and isinstance(c.get("id"), str) and c.get("required") is True
+        }
         covered: set[str] = set()
         valid = True
         entries = data.get("evidence", [])
@@ -586,7 +605,9 @@ class Checker:
         for index, evidence in enumerate(entries):
             if index not in latest_indices:
                 continue
-            if not isinstance(evidence, dict) or evidence.get("criterion_id") not in required:
+            criterion_id = evidence.get("criterion_id") if isinstance(evidence, dict) else None
+            check_id = evidence.get("check_id") if isinstance(evidence, dict) else None
+            if not isinstance(evidence, dict) or not isinstance(criterion_id, str) or criterion_id not in required or not isinstance(check_id, str):
                 valid = False
                 continue
             source = evidence.get("source_commit")
@@ -594,14 +615,14 @@ class Checker:
             evidence_revision = source if isinstance(source, str) and valid_commit(self.root, source) else commit
             historical_checks, historical_methods = self._verification_at_commit(evidence_revision)
             target_checks, target_methods = self._verification_at_commit(commit)
-            check = historical_checks.get(evidence.get("check_id"))
-            method = historical_methods.get(evidence.get("check_id"))
+            check = historical_checks.get(check_id)
+            method = historical_methods.get(check_id)
             if check is None and method is None:
                 valid = False
                 continue
-            if check is not None and target_checks.get(evidence.get("check_id")) != check:
+            if check is not None and target_checks.get(check_id) != check:
                 valid = False
-            if method is not None and target_methods.get(evidence.get("check_id")) != method:
+            if method is not None and target_methods.get(check_id) != method:
                 valid = False
             expected = check.get("argv", []) if check is not None else []
             if evidence.get("command") != expected:
@@ -626,7 +647,7 @@ class Checker:
                 minimum = check.get("minimum_discovered", 1)
                 if not all(type(count) is int and count >= 0 for count in counts) or counts[0] < minimum or counts[1] < minimum or counts[1] > counts[0] or counts[2] != 0:
                     valid = False
-            covered.add(evidence.get("criterion_id"))
+            covered.add(criterion_id)
         if required - covered:
             valid = False
         return valid
@@ -652,7 +673,7 @@ class Checker:
         reviews = data.get("reviews", [])
         if isinstance(reviews, list):
             for review in reviews:
-                if isinstance(review, dict) and review.get("verdict") in {"changes_required", "unable_to_verify"}:
+                if isinstance(review, dict) and is_one_of(review.get("verdict"), {"changes_required", "unable_to_verify"}):
                     findings = review.get("findings", [])
                     if isinstance(findings, list):
                         review_findings.update(finding for finding in findings if isinstance(finding, str))
@@ -662,6 +683,7 @@ class Checker:
             resolved_ids = {
                 resolution.get("finding_id")
                 for resolution in resolutions if isinstance(resolution, dict)
+                and isinstance(resolution.get("finding_id"), str)
                 and resolution.get("disposition") == "resolved" and not is_placeholder(resolution.get("evidence"))
             }
         return review_findings - resolved_ids
@@ -769,7 +791,7 @@ class Checker:
             review = reviews[-1] if isinstance(reviews, list) and reviews else None
             ready_review = (
                 isinstance(review, dict)
-                and review.get("role") in {"independent", "domain_owner"}
+                and is_one_of(review.get("role"), {"independent", "domain_owner"})
                 and review.get("verdict") == "ready"
                 and not review.get("findings")
                 and review.get("criteria_baseline_commit") == data.get("accepted_criteria_commit")
@@ -795,7 +817,7 @@ class Checker:
                 self.add("WRK003", "blocking", "blocked transition lacked a reason and next action at that commit", item_id, path="roadmap.md")
         if status in {"deferred", "cancelled"}:
             disposition = data.get("disposition")
-            if not isinstance(disposition, dict) or disposition.get("approval_source") not in {"user", "delegated_policy"} or not self._commit_artifact_exists(commit, disposition.get("evidence")) or not self._approval_ref_resolves_at(commit, disposition.get("approval_ref")):
+            if not isinstance(disposition, dict) or not is_one_of(disposition.get("approval_source"), {"user", "delegated_policy"}) or not self._commit_artifact_exists(commit, disposition.get("evidence")) or not self._approval_ref_resolves_at(commit, disposition.get("approval_ref")):
                 self.add("WRK015", "blocking", f"{status} transition lacked inspectable disposition evidence at that commit", item_id, path="roadmap.md")
 
     def _check_parent_completion_at_commit(self, commit: str, parent_id: str, roadmap: dict[str, dict[str, str]]) -> None:
@@ -806,7 +828,7 @@ class Checker:
             if child_data is None or child_data.get("completion_disposition") == "optional" or child_row.get("status") == "done":
                 continue
             disposition = child_data.get("disposition")
-            if child_row.get("status") not in {"deferred", "cancelled"} or not isinstance(disposition, dict) or disposition.get("approval_source") not in {"user", "delegated_policy"} or not self._commit_artifact_exists(commit, disposition.get("evidence")) or not self._approval_ref_resolves_at(commit, disposition.get("approval_ref")):
+            if child_row.get("status") not in {"deferred", "cancelled"} or not isinstance(disposition, dict) or not is_one_of(disposition.get("approval_source"), {"user", "delegated_policy"}) or not self._commit_artifact_exists(commit, disposition.get("evidence")) or not self._approval_ref_resolves_at(commit, disposition.get("approval_ref")):
                 self.add("WRK006", "blocking", f"parent was completed while required child {child_id} remained unfinished", parent_id, path="roadmap.md")
 
     def _check_items(self) -> None:
@@ -820,7 +842,7 @@ class Checker:
                 self.add("WRK001", "unable", "unsupported schema_version; migrate explicitly", item_id, path=rel)
             if data.get("id") != item_id or not WORK_ID.fullmatch(str(data.get("id", ""))):
                 self.add("WRK002", "blocking", "frontmatter ID must match filename and roadmap", item_id, path=rel)
-            if data.get("kind") not in KINDS or data.get("completion_disposition") not in {"required", "optional"}:
+            if not is_one_of(data.get("kind"), KINDS) or not is_one_of(data.get("completion_disposition"), {"required", "optional"}):
                 self.add("WRK001", "blocking", "invalid kind or completion_disposition", item_id, path=rel)
             arrays = ("ledger_refs", "criteria", "evidence", "decisions", "resolutions", "reviews")
             for key in arrays:
@@ -843,9 +865,10 @@ class Checker:
                 if set(criterion) != CRITERION_FIELDS:
                     self.add("WRK001", "blocking", f"criterion fields differ from schema (missing={sorted(CRITERION_FIELDS-set(criterion))}, unknown={sorted(set(criterion)-CRITERION_FIELDS)})", item_id, path=rel)
                 cid = criterion.get("id")
-                if not isinstance(cid, str) or not CRITERION_ID.fullmatch(cid) or not cid.startswith(item_id + "-") or cid in seen_criteria:
+                valid_cid = isinstance(cid, str) and bool(CRITERION_ID.fullmatch(cid)) and cid.startswith(item_id + "-")
+                if not valid_cid or cid in seen_criteria:
                     self.add("WRK007", "blocking", "criterion ID must be unique and stable for this work item", item_id, str(cid) if cid else None, rel)
-                if cid:
+                if valid_cid:
                     seen_criteria.add(cid)
                 if not isinstance(criterion.get("required"), bool) or is_placeholder(criterion.get("behavior")) or is_placeholder(criterion.get("verification_method")):
                     self.add("WRK007", "blocking", "criterion needs boolean required, concrete behavior, and verification_method", item_id, str(cid) if cid else None, rel)
@@ -900,7 +923,7 @@ class Checker:
             for key in ("discovered_tests", "selected_tests", "skipped_tests"):
                 if entry.get(key) is not None and (type(entry.get(key)) is not int or entry.get(key) < 0):
                     self.add("WRK001", "blocking", f"evidence.{key} must be a nonnegative integer or null", item_id, path=rel)
-            if entry.get("result") not in RESULTS or entry.get("provenance") not in PROVENANCE:
+            if not is_one_of(entry.get("result"), RESULTS) or not is_one_of(entry.get("provenance"), PROVENANCE):
                 self.add("WRK001", "blocking", "evidence result or provenance is outside the allowed values", item_id, path=rel)
             self._check_artifact_ref(entry.get("location"), item_id, rel, "evidence location")
 
@@ -912,7 +935,7 @@ class Checker:
             if not isinstance(entry.get("affected_criteria"), list) or not entry.get("affected_criteria") or not all(isinstance(cid, str) and CRITERION_ID.fullmatch(cid) for cid in entry.get("affected_criteria", [])):
                 self.add("WRK001", "blocking", "decision.affected_criteria must list stable criterion IDs", item_id, path=rel)
             change = entry.get("change_type")
-            if change not in {"clarify", "strengthen", "relax", "remove", "add"}:
+            if not is_one_of(change, {"clarify", "strengthen", "relax", "remove", "add"}):
                 self.add("WRK001", "blocking", "decision.change_type is outside the allowed values", item_id, path=rel)
             for key in ("previous_wording", "proposed_wording"):
                 value = entry.get(key)
@@ -920,7 +943,7 @@ class Checker:
                     self.add("WRK001", "blocking", f"decision.{key} must be concrete text or null", item_id, path=rel)
                 if value is None and not ((change == "add" and key == "previous_wording") or (change == "remove" and key == "proposed_wording")):
                     self.add("WRK001", "blocking", f"decision.{key} may be null only for its matching add/remove operation", item_id, path=rel)
-            if entry.get("approval_source") not in APPROVAL_SOURCES:
+            if not is_one_of(entry.get("approval_source"), APPROVAL_SOURCES):
                 self.add("WRK001", "blocking", "decision.approval_source is outside the allowed values", item_id, path=rel)
             if entry.get("approval_ref") is not None and not isinstance(entry.get("approval_ref"), str):
                 self.add("WRK001", "blocking", "decision.approval_ref must be a string or null", item_id, path=rel)
@@ -930,7 +953,7 @@ class Checker:
                 continue
             for key in ("finding_id", "evidence"):
                 required_text(entry.get(key), f"resolution.{key}")
-            if entry.get("disposition") not in {"resolved", "open"}:
+            if not is_one_of(entry.get("disposition"), {"resolved", "open"}):
                 self.add("WRK001", "blocking", "resolution.disposition is outside the allowed values", item_id, path=rel)
             if entry.get("approval_ref") is not None and not isinstance(entry.get("approval_ref"), str):
                 self.add("WRK001", "blocking", "resolution.approval_ref must be a string or null", item_id, path=rel)
@@ -938,7 +961,7 @@ class Checker:
         for entry in data.get("reviews", []) if isinstance(data.get("reviews"), list) else []:
             if not shape(entry, REVIEW_FIELDS, "review"):
                 continue
-            if entry.get("role") not in REVIEW_ROLES or entry.get("verdict") not in REVIEW_VERDICTS:
+            if not is_one_of(entry.get("role"), REVIEW_ROLES) or not is_one_of(entry.get("verdict"), REVIEW_VERDICTS):
                 self.add("WRK001", "blocking", "review role or verdict is outside the allowed values", item_id, path=rel)
             if entry.get("model") is not None and not isinstance(entry.get("model"), str):
                 self.add("WRK001", "blocking", "review.model must be a string or null", item_id, path=rel)
@@ -957,7 +980,7 @@ class Checker:
             if shape(disposition, {"reason", "approval_source", "approval_ref", "evidence"}, "disposition"):
                 required_text(disposition.get("reason"), "disposition.reason")
                 required_text(disposition.get("evidence"), "disposition.evidence")
-                if disposition.get("approval_source") not in {"user", "delegated_policy"}:
+                if not is_one_of(disposition.get("approval_source"), {"user", "delegated_policy"}):
                     self.add("WRK001", "blocking", "disposition.approval_source must be user or delegated_policy", item_id, path=rel)
                 if disposition.get("approval_ref") is not None and not isinstance(disposition.get("approval_ref"), str):
                     self.add("WRK001", "blocking", "disposition.approval_ref must be a string or null", item_id, path=rel)
@@ -1044,7 +1067,7 @@ class Checker:
                 self.add("WRK010", "blocking", "decision must be an object", item_id, path=path.relative_to(self.root).as_posix())
                 continue
             required = ("affected_criteria", "previous_wording", "proposed_wording", "change_type", "reason", "supporting_evidence", "user_impact", "verification_impact", "approval_source", "approval_ref")
-            if any(k not in decision for k in required) or decision.get("change_type") not in {"clarify", "strengthen", "relax", "remove", "add"} or decision.get("approval_source") not in APPROVAL_SOURCES:
+            if any(k not in decision for k in required) or not is_one_of(decision.get("change_type"), {"clarify", "strengthen", "relax", "remove", "add"}) or not is_one_of(decision.get("approval_source"), APPROVAL_SOURCES):
                 self.add("WRK010", "blocking", "decision is missing required fields or has invalid values", item_id, path=path.relative_to(self.root).as_posix())
                 continue
             wording_missing = (
@@ -1053,10 +1076,10 @@ class Checker:
             )
             if wording_missing or any(is_placeholder(decision.get(k)) for k in ("reason", "supporting_evidence", "user_impact", "verification_impact")):
                 self.add("WRK010", "blocking", "decision wording, rationale, evidence, and impacts must be explicit", item_id, path=path.relative_to(self.root).as_posix())
-            if decision.get("change_type") in {"relax", "remove"}:
-                if decision.get("approval_source") not in {"user", "delegated_policy"} or not self._approval_ref_resolves(decision.get("approval_ref")):
+            if is_one_of(decision.get("change_type"), {"relax", "remove"}):
+                if not is_one_of(decision.get("approval_source"), {"user", "delegated_policy"}) or not self._approval_ref_resolves(decision.get("approval_ref")):
                     self.add("WRK015", "blocking", "material reduction has no inspectable, corroborable approval source", item_id, path=path.relative_to(self.root).as_posix())
-            elif decision.get("approval_source") in {"user", "delegated_policy"} and not self._approval_ref_resolves(decision.get("approval_ref")):
+            elif is_one_of(decision.get("approval_source"), {"user", "delegated_policy"}) and not self._approval_ref_resolves(decision.get("approval_ref")):
                 self.add("WRK015", "blocking", "approval reference cannot be corroborated from a local source", item_id, path=path.relative_to(self.root).as_posix())
             elif decision.get("approval_source") == "unverified":
                 self.add("WRK015", "blocking", "approval is explicitly unverified", item_id, path=path.relative_to(self.root).as_posix())
@@ -1086,7 +1109,7 @@ class Checker:
                 self.add("WRK003", "blocking", "blocked status needs structured reason and next_action", item_id, path=rel)
         if status in {"deferred", "cancelled"}:
             disposition = data.get("disposition")
-            if not isinstance(disposition, dict) or any(is_placeholder(disposition.get(k)) for k in ("reason", "approval_ref", "evidence")) or disposition.get("approval_source") not in {"user", "delegated_policy"} or not self._approval_ref_resolves(disposition.get("approval_ref")):
+            if not isinstance(disposition, dict) or any(is_placeholder(disposition.get(k)) for k in ("reason", "approval_ref", "evidence")) or not is_one_of(disposition.get("approval_source"), {"user", "delegated_policy"}) or not self._approval_ref_resolves(disposition.get("approval_ref")):
                 self.add("WRK015", "blocking", "deferred/cancelled status needs reason and inspectable disposition authority", item_id, path=rel)
 
     def _changed_since(self, commit: str, watch: list[str]) -> set[str]:
@@ -1223,7 +1246,10 @@ class Checker:
             and (self.done_commits.get(item_id) != self.head_sha or self.dirty)
         )
         rel = path.relative_to(self.root).as_posix()
-        required = {c.get("id") for c in data.get("criteria", []) if isinstance(c, dict) and c.get("required") is True}
+        required = {
+            c.get("id") for c in data.get("criteria", [])
+            if isinstance(c, dict) and isinstance(c.get("id"), str) and c.get("required") is True
+        }
         entries = data.get("evidence", []) if isinstance(data.get("evidence"), list) else []
         covered: set[str] = set()
         latest_indices = self._latest_evidence_indices(entries)
@@ -1232,33 +1258,37 @@ class Checker:
                 self.add("WRK007", "blocking", "evidence must be an object", item_id, path=rel)
                 continue
             cid = ev.get("criterion_id")
-            if cid not in required:
+            if not isinstance(cid, str) or cid not in required:
                 self.add("WRK007", "blocking", f"evidence references non-required/unknown criterion {cid}", item_id, str(cid) if cid else None, rel)
                 continue
             if index not in latest_indices:
                 self.add("WRK008", "warning", f"historical evidence is superseded by a later result for {ev.get('check_id')}; retained for history", item_id, cid, rel)
                 continue
-            current_check = self.checks.get(ev.get("check_id"))
-            current_review_method = self.review_methods.get(ev.get("check_id"))
+            check_id = ev.get("check_id")
+            if not isinstance(check_id, str):
+                self.add("WRK007", "blocking", "evidence check_id must be a configured string ID", item_id, cid, rel)
+                continue
+            current_check = self.checks.get(check_id)
+            current_review_method = self.review_methods.get(check_id)
             check = current_check
             review_method = current_review_method
             if historical_done:
                 completion_commit = self.done_commits.get(item_id)
                 if completion_commit:
                     historical_checks, historical_methods = self._verification_at_commit(completion_commit)
-                    completion_check = historical_checks.get(ev.get("check_id"))
-                    completion_method = historical_methods.get(ev.get("check_id"))
+                    completion_check = historical_checks.get(check_id)
+                    completion_method = historical_methods.get(check_id)
                     if completion_check is not None or completion_method is not None:
                         if current_check != completion_check or current_review_method != completion_method:
                             self.add(
                                 "WRK008", "warning",
-                                f"historical evidence uses verification rule {ev.get('check_id')} from its done revision; current assurance needs re-verification under current rules",
+                                f"historical evidence uses verification rule {check_id} from its done revision; current assurance needs re-verification under current rules",
                                 item_id, cid, rel,
                             )
                         check = completion_check
                         review_method = completion_method
             if check is None and review_method is None:
-                self.add("WRK007", "blocking", f"unknown configured check ID {ev.get('check_id')}", item_id, cid, rel)
+                self.add("WRK007", "blocking", f"unknown configured check ID {check_id}", item_id, cid, rel)
                 continue
             source_commit = ev.get("source_commit")
             fingerprint = ev.get("source_fingerprint")
@@ -1300,7 +1330,7 @@ class Checker:
             if ev.get("command") != expected_argv:
                 severity = "warning" if historical_done else "blocking"
                 self.add("WRK007", severity, "recorded command differs from the current configured argv", item_id, cid, rel)
-            if ev.get("result") not in RESULTS or ev.get("provenance") not in PROVENANCE or not isinstance(ev.get("applicable"), bool):
+            if not is_one_of(ev.get("result"), RESULTS) or not is_one_of(ev.get("provenance"), PROVENANCE) or not isinstance(ev.get("applicable"), bool):
                 self.add("WRK007", "blocking", "evidence result, provenance, or applicability is invalid", item_id, cid, rel)
                 continue
             if review_method is not None and (ev.get("provenance") != "agent_reported" or ev.get("exit_status") is not None):
@@ -1352,7 +1382,7 @@ class Checker:
             if not isinstance(review, dict):
                 continue
             current_review = review_index == latest_review_index
-            if review.get("role") not in REVIEW_ROLES or review.get("verdict") not in REVIEW_VERDICTS:
+            if not is_one_of(review.get("role"), REVIEW_ROLES) or not is_one_of(review.get("verdict"), REVIEW_VERDICTS):
                 self.add("WRK009", "blocking", "review role or verdict is invalid", item_id, path=rel)
                 continue
             report = review.get("report")
@@ -1391,9 +1421,9 @@ class Checker:
                 substantive_after = bool(self._record_metadata_only_between(revision, done_at, later, item_id))
             if current_review and review.get("verdict") == "ready" and substantive_after:
                 self.add("WRK009", "blocking", "latest review assessed an older revision with substantive changes afterward", item_id, path=rel)
-            if current_review and review.get("role") in {"author", "self"}:
+            if current_review and is_one_of(review.get("role"), {"author", "self"}):
                 self.add("WRK009", "blocking", "latest review cannot be an author/self-review", item_id, path=rel)
-            if (current_review and review.get("role") in {"independent", "domain_owner"}
+            if (current_review and is_one_of(review.get("role"), {"independent", "domain_owner"})
                     and review.get("verdict") == "ready" and not review.get("findings")
                     and baseline_matches and rubric_matches and not substantive_after):
                 valid_ready = True

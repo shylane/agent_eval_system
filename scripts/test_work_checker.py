@@ -865,6 +865,44 @@ class WorkCheckerFixtures(unittest.TestCase):
         finally:
             repo.close()
 
+    def test_malformed_json_types_return_findings_and_cli_json(self) -> None:
+        cases = ("record", "reviewer-config", "verification-check")
+        for case in cases:
+            with self.subTest(case=case):
+                repo = FixtureRepo("in_progress")
+                try:
+                    if case == "record":
+                        data, body = read_record(repo.root)
+                        data["kind"] = []
+                        data["criteria"][0]["id"] = ["W-900-AC1"]
+                        write_record(repo.root, data, body)
+                    elif case == "reviewer-config":
+                        config_path = repo.root / "work" / "reviewer-config.json"
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                        config["required_reviewer_role"] = []
+                        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+                    else:
+                        config_path = repo.root / "verification.json"
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                        config["checks"][0]["minimum_discovered"] = []
+                        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+                    direct = validate(repo.root, "main")
+                    self.assertEqual(direct["outcome"], "failure", direct)
+                    self.assertTrue(direct["findings"], direct)
+
+                    proc = subprocess.run(
+                        [sys.executable, str(ROOT / "scripts" / "check_work.py"), "--root", str(repo.root), "--base-ref", "main", "--format", "json"],
+                        cwd=repo.root, text=True, encoding="utf-8", stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, check=False,
+                    )
+                    report = json.loads(proc.stdout)
+                    self.assertEqual(proc.returncode, 1, proc.stderr)
+                    self.assertEqual(report["outcome"], "failure", report)
+                    self.assertTrue(all("rule_id" in finding for finding in report["findings"]), report)
+                finally:
+                    repo.close()
+
 
 def main() -> int:
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(WorkCheckerFixtures)
