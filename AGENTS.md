@@ -1,6 +1,10 @@
 # Project handoff for coding agents
 
-- Start with [README.md](README.md). Read the relevant parts of [manifest.md](manifest.md), [experiments.md](experiments.md), and [references.md](references.md) before changing this project.
+- Start with [README.md](README.md), then [roadmap.md](roadmap.md) and only the selected linked work item. Read relevant parts of [manifest.md](manifest.md), [experiments.md](experiments.md), and [references.md](references.md) as needed.
+- Use the repository skill at [.agents/skills/project-work/SKILL.md](.agents/skills/project-work/SKILL.md) for create, resume, amend, and complete operations; invoke it as `$project-work`.
+- Authority map: manifest = product direction/boundaries; experiment ledger = hypotheses/methods/results/research decisions; roadmap = priority/status/parent/dependencies/owner/next action; work item = scope/criteria/checkpoints/decisions/evidence.
+- Before proposing completion, run `uv run --no-project python scripts/check_work.py` and follow [work/README.md](work/README.md). `in_review` is not `done` until required evidence is fresh and the required independent review is recorded.
+- Accepted-scope changes need a structured decision; the implementing agent cannot approve its own material reduction. See [work/policy.md](work/policy.md) and [work/review-procedure.md](work/review-procedure.md).
 - Before implementing the first workflow, choose it explicitly and write the `pilot_brief.md` described in the README; do not silently treat the refund/order example as a settled requirement.
 - Treat the manifest's vision as intended, not implemented. The healthcare claims work elsewhere in the repository is background, not this lab's product evidence.
 - Credit borrowed terms and external capabilities with primary-source links at first mention. Distinguish documented vendor claims, hands-on tests, and results demonstrated here. Recheck time-sensitive claims before publishing.
@@ -10,3 +14,5 @@
 - Keep each application's product-intent contract versioned and owner-approved. Treat scope classifications and feature ideas as reviewable hypotheses; never delete reachable safety cases or retroactively exclude failures to improve a score.
 - Keep the later app-dossier idea separate from the first pilot. If explored, distinguish owner-approved intent, observed evidence, and the lab's hypotheses; do not promote self-written notes into authority.
 - Do not use employer or customer data in public examples without appropriate clearance. Keep unrelated repository work untouched.
+
+- Keep fixer and reviewer models different for each reviewed revision. If a first fix pass on Astra (gpt-6-astra) findings leaves issues unresolved or regresses another finding, delegate bounded fixes to Sol-based subagents (for example, gpt-6-sol) under one integration owner. If those fixes still do not converge, escalate the remaining fixes to Astra and assign a non-Astra reviewer. Record model/effort when available; if a distinct reviewer is unavailable, leave review pending or unable to verify. Follow [work/review-procedure.md](work/review-procedure.md).
