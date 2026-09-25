@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "preferred_model": null,
+  "reasoning_effort": null,
+  "required_reviewer_role": "independent",
+  "fallback": "Synthetic fixture configuration only; preserve unable_to_verify when review is unavailable."
+}

@@ -1,0 +1,5 @@
+{
+  "fixture_kind": "synthetic_only",
+  "case_id": "valid_completion_seed",
+  "purpose": "Seed record using schema version 1; the test runner creates temporary Git history and evidence."
+}

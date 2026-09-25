@@ -1,5 +1,7 @@
 # Independent review procedure
 
+Rubric version: `review-rubric-v1`
+
 ## When
 
 Review substantive feature/milestone completion, material accepted-criteria or enforcement changes, and follow-up fixes to unresolved findings. Do not repeat review on unchanged inputs. Use one review and one review of fixes per checkpoint; stop when a decision or review-budget limit is reached.

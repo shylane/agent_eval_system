@@ -1,0 +1,59 @@
+name: Project records and verification
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      milestone:
+        description: Optional work ID to focus in the integrity report (for example W-000)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-management-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  configured-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact candidate revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.16"
+
+      - name: Run the explicit verification configuration
+        env:
+          WORK_BASE_REF: origin/main
+          MILESTONE: ${{ inputs.milestone }}
+        run: |
+          if [[ -n "$MILESTONE" ]]; then
+            uv run --no-project python scripts/run_verification.py --milestone "$MILESTONE" --report artifacts/project-verification.json
+          else
+            uv run --no-project python scripts/run_verification.py --report artifacts/project-verification.json
+          fi
+
+      - name: Preserve exact-revision verification report
+        if: ${{ always() && hashFiles('artifacts/project-verification.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-verification-${{ github.sha }}
+          path: artifacts/project-verification.json
+          if-no-files-found: error
+          retention-days: 30
