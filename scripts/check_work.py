@@ -162,6 +162,18 @@ def is_one_of(value: Any, choices: set[str]) -> bool:
     return isinstance(value, str) and value in choices
 
 
+def required_criterion_ids(data: dict[str, Any]) -> set[str]:
+    """Return only valid stable IDs from a correctly shaped criteria array."""
+    criteria = data.get("criteria")
+    if not isinstance(criteria, list):
+        return set()
+    return {
+        criterion["id"] for criterion in criteria
+        if isinstance(criterion, dict) and isinstance(criterion.get("id"), str)
+        and criterion.get("required") is True
+    }
+
+
 class Checker:
     def __init__(self, root: Path, base_ref: str | None = None, focus_id: str | None = None):
         self.root = root.resolve()
@@ -181,6 +193,7 @@ class Checker:
         self.done_commits: dict[str, str] = {}
         self.uncommitted_done_items: set[str] = set()
         self.history_configs: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
+        self.history_config_errors: set[str] = set()
         self.record_cache: dict[tuple[str, str], tuple[dict[str, Any] | None, str]] = {}
 
     def add(self, rule: str, severity: str, message: str, work_id: str | None = None,
@@ -568,11 +581,46 @@ class Checker:
             raw = git(self.root, "show", f"{commit}:verification.json", check=False)
             try:
                 config = json.loads(raw, object_pairs_hook=_pairs_no_duplicates)
-                checks = {entry["id"]: entry for entry in config.get("checks", []) if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
-                methods = {entry["id"]: entry for entry in config.get("review_methods", []) if isinstance(entry, dict) and isinstance(entry.get("id"), str)}
+                if (not isinstance(config, dict) or set(config) != {"schema_version", "checks", "review_methods"}
+                        or type(config.get("schema_version")) is not int or config["schema_version"] != 1
+                        or not isinstance(config.get("checks"), list) or not isinstance(config.get("review_methods"), list)):
+                    raise ValueError("expected the exact version-1 verification configuration with array catalogs")
+                checks: dict[str, dict[str, Any]] = {}
+                required = {"id", "argv", "test_expectation", "minimum_discovered", "watched_paths"}
+                allowed = required | {"timeout_seconds", "kind"}
+                for entry in config["checks"]:
+                    if (not isinstance(entry, dict) or set(entry) - allowed or not required <= set(entry)
+                            or not isinstance(entry.get("id"), str) or entry["id"] in checks
+                            or not re.fullmatch(r"[a-z][a-z0-9-]*", entry["id"])
+                            or not isinstance(entry.get("argv"), list) or not entry["argv"]
+                            or not all(isinstance(part, str) and part for part in entry["argv"])
+                            or type(entry.get("test_expectation")) is not bool
+                            or type(entry.get("minimum_discovered")) is not int or entry["minimum_discovered"] < 0
+                            or ("kind" in entry and entry["kind"] != "command")
+                            or ("timeout_seconds" in entry and (type(entry["timeout_seconds"]) is not int or entry["timeout_seconds"] < 1))
+                            or not isinstance(entry.get("watched_paths"), list)
+                            or not all(isinstance(path, str) and path and not path.startswith(("/", "\\")) and ".." not in PurePosixPath(path).parts for path in entry["watched_paths"])):
+                        raise ValueError("historical verification check has invalid fields or values")
+                    checks[entry["id"]] = entry
+                methods: dict[str, dict[str, Any]] = {}
+                method_fields = {"id", "procedure", "report_template", "required_reviewer_role"}
+                for entry in config["review_methods"]:
+                    if (not isinstance(entry, dict) or set(entry) != method_fields
+                            or not isinstance(entry.get("id"), str) or entry["id"] in methods
+                            or not re.fullmatch(r"[a-z][a-z0-9-]*", entry["id"])
+                            or not isinstance(entry.get("procedure"), str)
+                            or not isinstance(entry.get("report_template"), str)
+                            or not is_one_of(entry.get("required_reviewer_role"), {"independent", "domain_owner"})):
+                        raise ValueError("historical verification review method has invalid fields or values")
+                    methods[entry["id"]] = entry
+                if set(checks) & set(methods):
+                    raise ValueError("historical check and review method IDs overlap")
                 self.history_configs[commit] = (checks, methods)
-            except (json.JSONDecodeError, ValueError, AttributeError):
+            except (json.JSONDecodeError, ValueError, AttributeError, TypeError, KeyError) as exc:
                 self.history_configs[commit] = ({}, {})
+                if commit not in self.history_config_errors:
+                    self.add("WRK016", "unable", f"Historical verification configuration is invalid: {exc}", path="verification.json")
+                    self.history_config_errors.add(commit)
         return self.history_configs[commit]
 
     def _rubric_version_at(self, commit: str) -> str | None:
@@ -592,10 +640,7 @@ class Checker:
         return self._commit_artifact_exists(commit, ref)
 
     def _history_evidence_complete(self, commit: str, item_id: str, data: dict[str, Any]) -> bool:
-        required = {
-            c.get("id") for c in data.get("criteria", [])
-            if isinstance(c, dict) and isinstance(c.get("id"), str) and c.get("required") is True
-        }
+        required = required_criterion_ids(data)
         covered: set[str] = set()
         valid = True
         entries = data.get("evidence", [])
@@ -1018,7 +1063,10 @@ class Checker:
 
     @staticmethod
     def _criteria_map(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        return {c.get("id"): c for c in data.get("criteria", []) if isinstance(c, dict) and isinstance(c.get("id"), str)}
+        criteria = data.get("criteria")
+        if not isinstance(criteria, list):
+            return {}
+        return {c.get("id"): c for c in criteria if isinstance(c, dict) and isinstance(c.get("id"), str)}
 
     def _check_criteria_baseline(self, item_id: str, data: dict[str, Any], path: Path) -> None:
         row = self.roadmap[item_id]
@@ -1246,10 +1294,7 @@ class Checker:
             and (self.done_commits.get(item_id) != self.head_sha or self.dirty)
         )
         rel = path.relative_to(self.root).as_posix()
-        required = {
-            c.get("id") for c in data.get("criteria", [])
-            if isinstance(c, dict) and isinstance(c.get("id"), str) and c.get("required") is True
-        }
+        required = required_criterion_ids(data)
         entries = data.get("evidence", []) if isinstance(data.get("evidence"), list) else []
         covered: set[str] = set()
         latest_indices = self._latest_evidence_indices(entries)

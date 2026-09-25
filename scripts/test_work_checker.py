@@ -866,29 +866,48 @@ class WorkCheckerFixtures(unittest.TestCase):
             repo.close()
 
     def test_malformed_json_types_return_findings_and_cli_json(self) -> None:
-        cases = ("record", "reviewer-config", "verification-check")
+        cases = ("record", "criteria-null", "criteria-scalar", "reviewer-config", "verification-check", "historical-config")
         for case in cases:
             with self.subTest(case=case):
-                repo = FixtureRepo("in_progress")
+                repo = FixtureRepo("in_review")
+                expected_outcome = "failure"
+                expected_exit = 1
                 try:
                     if case == "record":
                         data, body = read_record(repo.root)
                         data["kind"] = []
                         data["criteria"][0]["id"] = ["W-900-AC1"]
                         write_record(repo.root, data, body)
+                    elif case in {"criteria-null", "criteria-scalar"}:
+                        data, body = read_record(repo.root)
+                        data["criteria"] = None if case == "criteria-null" else 1
+                        write_record(repo.root, data, body)
                     elif case == "reviewer-config":
                         config_path = repo.root / "work" / "reviewer-config.json"
                         config = json.loads(config_path.read_text(encoding="utf-8"))
                         config["required_reviewer_role"] = []
                         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-                    else:
+                    elif case == "verification-check":
                         config_path = repo.root / "verification.json"
                         config = json.loads(config_path.read_text(encoding="utf-8"))
                         config["checks"][0]["minimum_discovered"] = []
                         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+                    else:
+                        repo.record_ready_review()
+                        config_path = repo.root / "verification.json"
+                        valid_config = json.loads(config_path.read_text(encoding="utf-8"))
+                        invalid_config = json.loads(json.dumps(valid_config))
+                        invalid_config["checks"] = None
+                        config_path.write_text(json.dumps(invalid_config, indent=2) + "\n", encoding="utf-8")
+                        repo.set_status("done", "fixture-agent", "Preserve the malformed historical config case")
+                        repo.commit("synthetic done with malformed historical config")
+                        config_path.write_text(json.dumps(valid_config, indent=2) + "\n", encoding="utf-8")
+                        repo.commit("restore current verification config")
+                        expected_outcome = "unable_to_check"
+                        expected_exit = 3
 
                     direct = validate(repo.root, "main")
-                    self.assertEqual(direct["outcome"], "failure", direct)
+                    self.assertEqual(direct["outcome"], expected_outcome, direct)
                     self.assertTrue(direct["findings"], direct)
 
                     proc = subprocess.run(
@@ -897,8 +916,8 @@ class WorkCheckerFixtures(unittest.TestCase):
                         stderr=subprocess.PIPE, check=False,
                     )
                     report = json.loads(proc.stdout)
-                    self.assertEqual(proc.returncode, 1, proc.stderr)
-                    self.assertEqual(report["outcome"], "failure", report)
+                    self.assertEqual(proc.returncode, expected_exit, proc.stderr)
+                    self.assertEqual(report["outcome"], expected_outcome, report)
                     self.assertTrue(all("rule_id" in finding for finding in report["findings"]), report)
                 finally:
                     repo.close()
