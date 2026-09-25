@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
-import hashlib
 import json
 import os
 import re
@@ -86,6 +85,14 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any] | None, str | None, str
     return data, raw, ""
 
 
+def frontmatter_body(text: str) -> str:
+    """Return Markdown after the JSON frontmatter, or an empty string if malformed."""
+    if not text.startswith("---\n"):
+        return ""
+    end = text.find("\n---\n", 4)
+    return text[end + len("\n---\n"):] if end >= 0 else ""
+
+
 def git(root: Path, *args: str, check: bool = True) -> str:
     proc = subprocess.run(
         ["git", *args], cwd=root, text=True, encoding="utf-8", errors="replace",
@@ -131,6 +138,8 @@ def parse_roadmap(text: str) -> tuple[dict[str, dict[str, str]], list[str]]:
         rows[item_id] = {
             "id": item_id, "link": link.group(1) if link else "", "priority": cells[2],
             "status": cells[3], "parent": cells[4], "depends_on": cells[5],
+            "parent_ids": [] if cells[4] == "—" else [part.strip() for part in cells[4].split(",") if part.strip()],
+            "depends_on_ids": [] if cells[5] == "—" else [part.strip() for part in cells[5].split(",") if part.strip()],
             "owner": cells[6], "next_action": cells[7], "line": str(line_no),
         }
     if header is None:
@@ -165,6 +174,7 @@ class Checker:
         self.dirty = False
         self.done_commits: dict[str, str] = {}
         self.history_configs: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]] = {}
+        self.record_cache: dict[tuple[str, str], tuple[dict[str, Any] | None, str]] = {}
 
     def add(self, rule: str, severity: str, message: str, work_id: str | None = None,
             criterion_id: str | None = None, path: str | None = None) -> None:
@@ -437,6 +447,13 @@ class Checker:
                 for item_id, row in current.items():
                     old = previous.get(item_id, {}).get("status")
                     new = row.get("status", "")
+                    old_data, _ = self._record_at_commit(previous_commit, item_id)
+                    new_data, _ = self._record_at_commit(commit, item_id)
+                    if old_data is not None and new_data is not None:
+                        old_baseline = old_data.get("accepted_criteria_commit")
+                        new_baseline = new_data.get("accepted_criteria_commit")
+                        if old_baseline is not None and new_baseline != old_baseline:
+                            self.add("WRK010", "blocking", "accepted_criteria_commit is an immutable acceptance anchor and cannot be moved", item_id, path=f"work/{item_id}.md")
                     if not self._transition_ok(old, new):
                         self.add("WRK003", "blocking", f"invalid status transition {old or 'new'} -> {new}", item_id, path="roadmap.md")
                     if new == "done" and old != "done":
@@ -462,19 +479,31 @@ class Checker:
                 self.add("WRK006", "blocking", f"roadmap item {removed_id} was removed from the working tree; retain it and record an explicit disposition", removed_id, path="roadmap.md")
             for item_id, row in self.roadmap.items():
                 old = head_rows.get(item_id, {}).get("status")
+                current_data = self.items.get(item_id, (None, "", None))[0]
+                head_data, _ = self._record_at_commit(self.head_sha, item_id)
+                if head_data is not None and current_data is not None:
+                    old_baseline = head_data.get("accepted_criteria_commit")
+                    new_baseline = current_data.get("accepted_criteria_commit")
+                    if old_baseline is not None and new_baseline != old_baseline:
+                        self.add("WRK010", "blocking", "accepted_criteria_commit is an immutable acceptance anchor and cannot be moved", item_id, path=f"work/{item_id}.md")
                 if old != row["status"] and not self._transition_ok(old, row["status"]):
                     self.add("WRK003", "blocking", f"invalid working-tree status transition {old or 'new'} -> {row['status']}", item_id, path="roadmap.md")
                 if row["status"] == "done" and old != "done":
                     self.done_commits[item_id] = self.head_sha
         except Exception as exc:
-            self.add("WRK016", "unable", f"Cannot inspect status history: {exc}", path="roadmap.md")
+            self.add("WRK016", "unable", f"Cannot inspect status history: {type(exc).__name__}: {exc!r}", path="roadmap.md")
 
     def _record_at_commit(self, commit: str, item_id: str) -> tuple[dict[str, Any] | None, str]:
+        key = (commit, item_id)
+        if key in self.record_cache:
+            return self.record_cache[key]
         record = git(self.root, "show", f"{commit}:work/{item_id}.md", check=False)
         if not record:
-            return None, ""
+            self.record_cache[key] = (None, "")
+            return self.record_cache[key]
         data, _, error = parse_frontmatter(record)
-        return (data, record) if not error else (None, record)
+        self.record_cache[key] = ((data, record) if not error else (None, record))
+        return self.record_cache[key]
 
     def _commit_artifact_exists(self, commit: str, value: Any) -> bool:
         if not isinstance(value, str) or not value.strip():
@@ -521,7 +550,6 @@ class Checker:
         required = {c.get("id") for c in data.get("criteria", []) if isinstance(c, dict) and c.get("required") is True}
         covered: set[str] = set()
         valid = True
-        historical_checks, historical_methods = self._verification_at_commit(commit)
         entries = data.get("evidence", [])
         if not isinstance(entries, list):
             return False
@@ -529,11 +557,20 @@ class Checker:
             if not isinstance(evidence, dict) or evidence.get("criterion_id") not in required:
                 valid = False
                 continue
+            source = evidence.get("source_commit")
+            fingerprint = evidence.get("source_fingerprint")
+            evidence_revision = source if isinstance(source, str) and valid_commit(self.root, source) else commit
+            historical_checks, historical_methods = self._verification_at_commit(evidence_revision)
+            target_checks, target_methods = self._verification_at_commit(commit)
             check = historical_checks.get(evidence.get("check_id"))
             method = historical_methods.get(evidence.get("check_id"))
             if check is None and method is None:
                 valid = False
                 continue
+            if check is not None and target_checks.get(evidence.get("check_id")) != check:
+                valid = False
+            if method is not None and target_methods.get(evidence.get("check_id")) != method:
+                valid = False
             expected = check.get("argv", []) if check is not None else []
             if evidence.get("command") != expected:
                 valid = False
@@ -542,11 +579,11 @@ class Checker:
                 continue
             if evidence.get("criteria_baseline_commit") != data.get("accepted_criteria_commit"):
                 valid = False
-            source = evidence.get("source_commit")
-            fingerprint = evidence.get("source_fingerprint")
             if bool(source) == bool(fingerprint) or (source and not valid_commit(self.root, source)):
                 valid = False
             if fingerprint and not re.fullmatch(r"[0-9a-f]{64}", str(fingerprint)):
+                valid = False
+            if not self._history_evidence_fresh(commit, item_id, check, method, source, fingerprint):
                 valid = False
             if not self._commit_artifact_exists(commit, evidence.get("location")):
                 valid = False
@@ -561,6 +598,72 @@ class Checker:
         if required - covered:
             valid = False
         return valid
+
+    def _is_ancestor(self, ancestor: str, revision: str) -> bool:
+        return subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, revision], cwd=self.root,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        ).returncode == 0
+
+    def _changed_between(self, source: str, target: str, watch: list[str]) -> set[str]:
+        if not valid_commit(self.root, source) or not valid_commit(self.root, target) or not self._is_ancestor(source, target):
+            return {"<unresolved-source-revision>"}
+        names = git(self.root, "diff", "--name-only", f"{source}..{target}", check=False).splitlines()
+        normalized = {name.replace("\\", "/") for name in names if name}
+        return {name for name in normalized if any(fnmatch.fnmatch(name, pattern) for pattern in watch)}
+
+    def _input_fingerprint_at(self, revision: str, watch: list[str]) -> str | None:
+        if not valid_commit(self.root, revision):
+            return None
+        names = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", revision], cwd=self.root,
+            text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        if names.returncode:
+            return None
+        selected = sorted(name.replace("\\", "/") for name in names.stdout.splitlines()
+                          if any(fnmatch.fnmatch(name.replace("\\", "/"), pattern) for pattern in watch))
+        digest = hashlib.sha256()
+        for name in selected:
+            blob = subprocess.run(
+                ["git", "show", f"{revision}:{name}"], cwd=self.root,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+            )
+            if blob.returncode:
+                return None
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(blob.stdout)
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def _history_evidence_fresh(self, target: str, item_id: str, check: dict[str, Any] | None,
+                                method: dict[str, Any] | None, source: Any, fingerprint: Any) -> bool:
+        if check is None and method is None:
+            return False
+        if check is not None:
+            watch = check.get("watched_paths", [])
+            if not isinstance(watch, list) or any(not isinstance(path, str) for path in watch):
+                return False
+            if fingerprint:
+                return fingerprint == self._input_fingerprint_at(target, watch)
+            if not isinstance(source, str):
+                return False
+            changed = self._changed_between(source, target, watch)
+            if check.get("id") == "record-integrity":
+                changed = self._record_metadata_only_between(source, target, changed, item_id)
+            return not changed
+        assert method is not None
+        if fingerprint:
+            return False
+        if not isinstance(source, str):
+            return False
+        watched = [method.get("procedure"), method.get("report_template")]
+        if any(not isinstance(path, str) for path in watched):
+            return False
+        changed = self._changed_between(source, target, ["*"])
+        return not self._record_metadata_only_between(source, target, changed, item_id)
 
     def _check_transition_snapshot(self, commit: str, item_id: str, status: str, row: dict[str, str], roadmap: dict[str, dict[str, str]]) -> None:
         data, record_text = self._record_at_commit(commit, item_id)
@@ -931,8 +1034,43 @@ class Checker:
                 digest.update(b"\0")
         return digest.hexdigest()
 
+    def _record_metadata_only_between(self, before_commit: str, after_commit: str, paths: set[str], item_id: str) -> set[str]:
+        """Exclude only documented record bookkeeping between two immutable revisions."""
+        remaining = set(paths)
+        if "roadmap.md" in remaining:
+            before_text = git(self.root, "show", f"{before_commit}:roadmap.md", check=False)
+            before_rows, _ = parse_roadmap(before_text) if before_text else ({}, [])
+            after_text = git(self.root, "show", f"{after_commit}:roadmap.md", check=False)
+            current_rows, _ = parse_roadmap(after_text) if after_text else ({}, [])
+            mutable = {"status", "owner", "next_action", "line"}
+            def stable_rows(rows: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+                return {key: {field: value for field, value in row.items() if field not in mutable} for key, row in rows.items()}
+            if stable_rows(before_rows) == stable_rows(current_rows):
+                remaining.discard("roadmap.md")
+
+        record_rel = f"work/{item_id}.md"
+        if record_rel in remaining:
+            before = git(self.root, "show", f"{before_commit}:{record_rel}", check=False)
+            after = git(self.root, "show", f"{after_commit}:{record_rel}", check=False)
+            old_data, _, old_error = parse_frontmatter(before)
+            new_data, _, new_error = parse_frontmatter(after)
+            if not old_error and not new_error and old_data is not None and new_data is not None:
+                for data in (old_data, new_data):
+                    data.pop("evidence", None)
+                    data.pop("reviews", None)
+                def stable_body(record: str) -> str:
+                    body = frontmatter_body(record)
+                    for heading in ("## Execution checkpoint", "## Evidence", "## Review"):
+                        body = re.sub(rf"{re.escape(heading)}\s*\n.*?(?=\n## |\Z)", heading + "\n<mutable>\n", body, flags=re.S)
+                    return body.strip()
+                if old_data == new_data and stable_body(before) == stable_body(after):
+                    remaining.discard(record_rel)
+
+        remaining = {name for name in remaining if not name.startswith("work/reviews/")}
+        return remaining
+
     def _record_metadata_only_since(self, commit: str, paths: set[str], item_id: str, current_text: str) -> set[str]:
-        """Exclude post-run record bookkeeping after the final read-only check is repeated."""
+        """Exclude allowed bookkeeping between an evidence commit and the current checkout."""
         remaining = set(paths)
         if "roadmap.md" in remaining:
             before_text = git(self.root, "show", f"{commit}:roadmap.md", check=False)
@@ -954,7 +1092,7 @@ class Checker:
                     data.pop("evidence", None)
                     data.pop("reviews", None)
                 def stable_body(record: str) -> str:
-                    _, _, body = parse_frontmatter(record)
+                    body = frontmatter_body(record)
                     for heading in ("## Execution checkpoint", "## Evidence", "## Review"):
                         body = re.sub(rf"{re.escape(heading)}\s*\n.*?(?=\n## |\Z)", heading + "\n<mutable>\n", body, flags=re.S)
                     return body.strip()
@@ -989,7 +1127,7 @@ class Checker:
             if bool(source_commit) == bool(fingerprint):
                 self.add("WRK008", "blocking", "evidence needs exactly one source commit or fingerprint", item_id, cid, rel)
                 continue
-            watch = check.get("watched_paths", []) if check is not None else []
+            watch = check.get("watched_paths", []) if check is not None else ["*"]
             stale_paths: set[str] = set()
             historical_stale = False
             if source_commit:

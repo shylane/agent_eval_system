@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from check_work import parse_frontmatter, validate
+from check_work import frontmatter_body, parse_frontmatter, validate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +33,7 @@ def read_record(root: Path, item_id: str = "W-900") -> tuple[dict[str, Any], str
     data, _, error = parse_frontmatter(text)
     if error or data is None:
         raise AssertionError(error)
-    return data, text
+    return data, frontmatter_body(text)
 
 
 def write_record(root: Path, data: dict[str, Any], body: str, item_id: str = "W-900") -> None:
@@ -41,13 +41,37 @@ def write_record(root: Path, data: dict[str, Any], body: str, item_id: str = "W-
     (root / "work" / f"{item_id}.md").write_text(text, encoding="utf-8")
 
 
+def update_roadmap_row(root: Path, item_id: str, *, status: str | None = None,
+                       parent: str | None = None, depends_on: str | None = None) -> None:
+    path = root / "roadmap.md"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(f"| {item_id} | "):
+            cells = [part.strip() for part in line.strip().strip("|").split("|")]
+            if status is not None:
+                cells[3] = status
+            if parent is not None:
+                cells[4] = parent
+            if depends_on is not None:
+                cells[5] = depends_on
+            lines[index] = "| " + " | ".join(cells) + " |"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return
+    raise AssertionError(f"missing roadmap row {item_id}")
+
+
 class FixtureRepo:
     """Construct an isolated synthetic history with a proposed item and a valid completion."""
 
-    def __init__(self, final_status: str = "done"):
+    def __init__(self, final_status: str = "done", integrity_watches_work: bool = False):
         self.temp = tempfile.TemporaryDirectory(prefix="work-record-fixture-")
         self.root = Path(self.temp.name)
         shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
+        if integrity_watches_work:
+            config_path = self.root / "verification.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["checks"][0]["watched_paths"].extend(["roadmap.md", "work/**"])
+            config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         git(self.root, "init", "--initial-branch=main")
         git(self.root, "config", "user.name", "Fixture Runner")
         git(self.root, "config", "user.email", "fixture@example.invalid")
@@ -79,12 +103,12 @@ class FixtureRepo:
             "exit_status": 0,
             "result": "pass",
             "applicable": True,
-            "summary": "Ten required synthetic fixture tests were discovered, selected, and passed.",
+            "summary": "Fourteen required synthetic fixture tests were discovered, selected, and passed.",
             "location": "case.json",
             "provenance": "runner_observed",
             "environment": "isolated temporary Git repository; Python stdlib",
-            "discovered_tests": 10,
-            "selected_tests": 10,
+            "discovered_tests": 14,
+            "selected_tests": 14,
             "skipped_tests": 0,
         }
         data, body = read_record(self.root)
@@ -209,7 +233,7 @@ class WorkCheckerFixtures(unittest.TestCase):
             repo.close()
 
     def test_skipped_or_undiscovered_tests(self) -> None:
-        for discovered, selected, skipped in ((9, 9, 1), (0, 0, 0)):
+        for discovered, selected, skipped in ((13, 13, 1), (0, 0, 0)):
             repo = FixtureRepo("in_review")
             try:
                 data, body = read_record(repo.root)
@@ -282,6 +306,106 @@ class WorkCheckerFixtures(unittest.TestCase):
             self.assertFalse([f for f in result["findings"] if f["severity"] in {"blocking", "missing", "unable"}], result)
         finally:
             repo.close()
+
+    def test_stale_inputs_block_the_historical_in_review_transition(self) -> None:
+        repo = FixtureRepo("in_progress")
+        try:
+            with (repo.root / "tests" / "test_behavior.py").open("a", encoding="utf-8") as handle:
+                handle.write("# changed before the review transition\n")
+            repo.set_status("in_review", "fixture-agent", "Request review with stale inputs")
+            repo.commit("synthetic stale in-review transition")
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("in_review transition lacked complete fresh evidence" in f["message"] for f in findings(result, "WRK007")),
+                result,
+            )
+        finally:
+            repo.close()
+
+    def test_historical_dependency_and_required_child_are_checked(self) -> None:
+        dependency = FixtureRepo("in_progress")
+        try:
+            self.add_child(dependency.root, parent="—")
+            update_roadmap_row(dependency.root, "W-900", status="in_review", depends_on="W-901")
+            dependency.commit("synthetic start before dependency completion")
+            update_roadmap_row(dependency.root, "W-901", status="done")
+            dependency.commit("synthetic later dependency completion")
+            result = validate(dependency.root, "main")
+            self.assertTrue(
+                any("transition started before dependency W-901" in f["message"] for f in findings(result, "WRK004")),
+                result,
+            )
+        finally:
+            dependency.close()
+
+        parent = FixtureRepo("in_progress")
+        try:
+            self.add_child(parent.root, parent="W-900")
+            update_roadmap_row(parent.root, "W-900", status="in_review")
+            parent.commit("synthetic parent enters review")
+            update_roadmap_row(parent.root, "W-900", status="done")
+            parent.commit("synthetic parent completes before required child")
+            update_roadmap_row(parent.root, "W-901", status="done")
+            parent.commit("synthetic later child completion")
+            result = validate(parent.root, "main")
+            self.assertTrue(
+                any("parent was completed while required child W-901 remained unfinished" in f["message"] for f in findings(result, "WRK006")),
+                result,
+            )
+        finally:
+            parent.close()
+
+    def test_accepted_criteria_anchor_cannot_be_moved_to_hide_an_edit(self) -> None:
+        repo = FixtureRepo("in_progress")
+        try:
+            data, body = read_record(repo.root)
+            data["criteria"][0]["behavior"] = "Replace the agreed comparison with an unsupported success claim."
+            write_record(repo.root, data, body)
+            repo.commit("synthetic criteria edit")
+            changed_criteria_commit = git(repo.root, "rev-parse", "HEAD")
+            data, body = read_record(repo.root)
+            data["accepted_criteria_commit"] = changed_criteria_commit
+            write_record(repo.root, data, body)
+            repo.commit("synthetic attempt to move accepted baseline")
+            result = validate(repo.root, "main")
+            self.assertTrue(
+                any("immutable acceptance anchor" in f["message"] for f in findings(result, "WRK010")),
+                result,
+            )
+        finally:
+            repo.close()
+
+    def test_scope_prose_change_is_not_record_bookkeeping(self) -> None:
+        repo = FixtureRepo("in_review", integrity_watches_work=True)
+        try:
+            data, body = read_record(repo.root)
+            check = next(check for check in json.loads((repo.root / "verification.json").read_text(encoding="utf-8"))["checks"] if check["id"] == "record-integrity")
+            data["evidence"][0].update({
+                "check_id": "record-integrity", "command": check["argv"],
+                "discovered_tests": None, "selected_tests": None, "skipped_tests": None,
+            })
+            edited_body = body.replace("Included: temporary version-1 records, controlled fixture mutations, and assertions on checker findings.",
+                                       "Included: a widened synthetic behavior beyond the accepted fixture.")
+            write_record(repo.root, data, edited_body)
+            result = validate(repo.root, "main")
+            self.assertTrue(findings(result, "WRK008"), result)
+        finally:
+            repo.close()
+
+    @staticmethod
+    def add_child(root: Path, *, parent: str) -> None:
+        child = {
+            "schema_version": 1, "id": "W-901", "kind": "task", "authorization_ref": None,
+            "accepted_criteria_commit": None, "implementation_base_commit": None,
+            "completion_disposition": "required", "ledger_refs": [],
+            "criteria": [{"id": "W-901-AC1", "required": True, "behavior": "Complete the child task", "verification_method": "Inspect the fixture state"}],
+            "evidence": [], "decisions": [], "resolutions": [], "reviews": [], "blocker": None, "disposition": None,
+        }
+        body = "\n# Child task\n\n## Outcome\nComplete the synthetic child.\n\n## Scope\nIncluded: synthetic state.\n\nExcluded: product behavior.\n\n## Acceptance criteria\nStructured fixture criterion.\n\n## Execution checkpoint\nNot started.\n\n## Decisions and changes\nNone.\n\n## Evidence\nNone.\n\n## Review\nNone.\n"
+        write_record(root, child, body, "W-901")
+        roadmap = root / "roadmap.md"
+        text = roadmap.read_text(encoding="utf-8")
+        roadmap.write_text(text + f"| W-901 | [Required child](work/W-901.md) | P2 | proposed | {parent} | — | unassigned | Define fixture scope |\n", encoding="utf-8")
 
     def test_nested_schema_and_removed_scope_are_blocked(self) -> None:
         repo = FixtureRepo()

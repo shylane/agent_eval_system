@@ -11,7 +11,7 @@ Top-level keys are exactly those listed in [work/README.md](README.md): `schema_
 - `decisions.change_type`: `clarify | strengthen | relax | remove | add`; `approval_source`: `user | delegated_policy | not_required | unverified`.
 - `resolutions.disposition`: `resolved | open`.
 - `reviews.verdict`: `ready | changes_required | unable_to_verify`; `role`: `independent | domain_owner | author | self`.
-- Commit references are full immutable 40- or 64-character object IDs. Moving branch names are not baselines. `accepted_criteria_commit` contains the accepted criterion wording; `implementation_base_commit` is the implementation starting snapshot and may equal the criteria commit.
+- Commit references are full immutable 40- or 64-character object IDs. Moving branch names are not baselines. `accepted_criteria_commit` is the fixed acceptance anchor from initial authorization; it cannot be moved later to hide a criteria edit. Later accepted amendments remain visible in decision records against that anchor. `implementation_base_commit` is the implementation starting snapshot and may equal the criteria commit.
 
 Criterion shape is exactly `{id, required, behavior, verification_method}`. IDs are unique/stable `<work-id>-AC<n>`.
 
@@ -57,7 +57,7 @@ Permitted transitions (remaining in the same state is allowed):
 | done | none |
 | cancelled | none |
 
-`ready` needs authorization, clear scope/criteria/methods, and immutable criteria/base refs in the transition commit. `in_progress` needs a named owner and completed required dependencies. `in_review` needs passing evidence for every required criterion. `done` needs the same evidence plus a ready required review and no unfinished required children. `blocked` needs a concrete reason and next action. `deferred`/`cancelled` need disposition evidence and attributable authority. Returning from `deferred` to `proposed` adds a new decision. Done and cancelled are terminal; create corrective work instead of erasing history. The checker inspects the Git status history and validates transition-time prerequisites.
+`ready` needs authorization, clear scope/criteria/methods, and immutable criteria/base refs in the transition commit. `in_progress` needs a named owner and completed required dependencies. `in_review` needs passing evidence for every required criterion. `done` needs the same evidence plus a ready required review and no unfinished required children. `blocked` needs a concrete reason and next action. `deferred`/`cancelled` need disposition evidence and attributable authority. Returning from `deferred` to `proposed` adds a new decision. Done and cancelled are terminal; create corrective work instead of erasing history. The checker inspects the Git status history and validates transition-time prerequisites, including evidence freshness against the exact source revision and dependency/parent rows from that commit.
 
 Before substantive implementation record accepted criteria, implementation base, and authorization. Existing explicit user instructions count; do not ask twice. Routine choices within accepted scope need no repeated approval. Optional work does not start automatically after required work.
 
